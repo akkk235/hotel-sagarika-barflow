@@ -304,8 +304,8 @@ export default function Billing({ data, settings, user, online, notify, refresh,
         <div className="product-grid">
           {visible.map((p) => {
             const cheapest = p.variants.reduce((m, v) => (m === null || v.price < m ? v.price : m), null);
-            const low = p.stock_qty <= p.low_stock_qty;
-            const out = p.stock_qty <= 0;
+            const low = bottlesOf(p) <= Number(p.low_stock_qty || 0);
+            const out = bottlesOf(p) <= 0;
             return (
               <button key={p.id} type="button" className="product-card" onClick={() => openProduct(p)}>
                 <span className="pcat" style={{ color: p.category_color || 'var(--muted)' }}>
@@ -314,7 +314,11 @@ export default function Billing({ data, settings, user, online, notify, refresh,
                 <span className="pname">{p.name}</span>
                 <span className="pprice">{cheapest === null ? '—' : `from ${money(cheapest)}`}</span>
                 <span className={`stock-line ${out ? 'out' : low ? 'low' : ''}`}>
-                  {out ? 'Out of stock' : `${Math.floor(p.stock_qty)} ${p.unit_type === 'ml' ? 'ml' : 'units'} left`}
+                  {out
+                    ? 'Out of stock'
+                    : p.unit_type === 'ml'
+                      ? `${bottlesOf(p).toFixed(2)} bottles left`
+                      : `${Math.floor(bottlesOf(p))} units left`}
                 </span>
               </button>
             );
