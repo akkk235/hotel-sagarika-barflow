@@ -3,6 +3,17 @@ import { api } from '../api.js';
 
 const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const POURS = [30, 60, 90, 120, 150, 180];
+const BOTTLE_ML = 180;
+const bottlesOf = (p) =>
+  Number(p.stock_bottles ?? (p.unit_type === 'ml' ? Number(p.stock_qty) / BOTTLE_ML : Number(p.stock_qty))) || 0;
+const unitsOf = (p) => (p.unit_type === 'ml' ? bottlesOf(p) : Number(p.stock_qty) || 0);
+const isLow = (p) => unitsOf(p) <= Number(p.low_stock_qty || 0);
+const bottleLabel = (p) => {
+  const total = bottlesOf(p);
+  const sealed = Math.floor(total + 1e-9);
+  const loose = Math.round((total - sealed) * BOTTLE_ML);
+  return { total: total.toFixed(2), sealed, loose };
+};
 
 export default function Products({ data, user, notify, refresh, online }) {
   const products = data?.products || [];
@@ -17,14 +28,14 @@ export default function Products({ data, user, notify, refresh, online }) {
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
     return products.filter((p) => {
-      if (filter === 'low' && !(p.stock_qty <= p.low_stock_qty)) return false;
-      if (filter === 'out' && p.stock_qty > 0) return false;
+      if (filter === 'low' && !isLow(p)) return false;
+      if (filter === 'out' && unitsOf(p) > 0) return false;
       if (!q) return true;
       return `${p.name} ${p.brand || ''} ${p.category_name || ''}`.toLowerCase().includes(q);
     });
   }, [products, search, filter]);
 
-  const lowCount = products.filter((p) => p.stock_qty <= p.low_stock_qty).length;
+  const lowCount = products.filter(isLow).length;
 
   function newProduct() {
     setEdit({
@@ -33,9 +44,9 @@ export default function Products({ data, user, notify, refresh, online }) {
       brand: '',
       category_id: categories[0]?.id || '',
       unit_type: 'ml',
-      bottle_size_ml: 750,
+      bottle_size_ml: 180,
       stock_qty: 0,
-      low_stock_qty: 1500,
+      low_stock_qty: 2,
       cost_price: 0,
       peg_price: 60,
       variants: POURS.map((ml) => ({ ml, label: `${ml} ml`, price: Math.round((60 * ml) / 3) / 10 })),
@@ -49,8 +60,8 @@ export default function Products({ data, user, notify, refresh, online }) {
       brand: p.brand || '',
       category_id: p.category_id || '',
       unit_type: p.unit_type,
-      bottle_size_ml: p.bottle_size_ml || '',
-      stock_qty: p.stock_qty,
+      bottle_size_ml: p.bottle_size_ml || 180,
+      stock_qty: p.unit_type === 'ml' ? bottlesOf(p) : p.stock_qty,
       low_stock_qty: p.low_stock_qty,
       cost_price: p.cost_price,
       variants: p.variants.map((v) => ({ ml: v.ml, label: v.label, price: v.price, consume_qty: v.consume_qty })),
@@ -80,7 +91,13 @@ export default function Products({ data, user, notify, refresh, online }) {
         })),
       };
       if (edit.id) await api(`/products/${edit.id}`, { method: 'PUT', body });
-      else await api('/products', { method: 'POST', body: { ...body, stock_qty: Number(edit.stock_qty) || 0 } });
+      else {
+        const qty = Number(edit.stock_qty) || 0;
+        await api('/products', {
+          method: 'POST',
+          body: { ...body, ...(edit.unit_type === 'ml' ? { stock_bottles: qty } : { stock_qty: qty }) },
+        });
+      }
       notify(edit.id ? 'Product updated' : 'Product added', 'ok');
       setEdit(null);
       await refresh();
@@ -164,7 +181,8 @@ export default function Products({ data, user, notify, refresh, online }) {
       {shown.length === 0 ? <div className="empty">No products found.</div> : null}
 
       {shown.map((p) => {
-        const low = p.stock_qty <= p.low_stock_qty;
+        const low = isLow(p);
+        const b = bottleLabel(p);
         return (
           <div className="card" key={p.id}>
             <div className="row between">
@@ -177,13 +195,19 @@ export default function Products({ data, user, notify, refresh, online }) {
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontWeight: 750, color: low ? 'var(--amber)' : 'var(--text)' }}>
-                  {Math.floor(p.stock_qty)} {p.unit_type === 'ml' ? 'ml' : 'u'}
+                  {p.unit_type === 'ml' ? `${b.total} bt` : `${Math.floor(b.total)} u`}
                 </div>
-                <div className="tiny muted">min {Math.floor(p.low_stock_qty)}</div>
+                <div className="tiny muted">
+                  {p.unit_type === 'ml'
+                    ? `${b.sealed} sealed${b.loose ? ` + ${b.loose} ml loose` : ''}`
+                    : `min ${Math.floor(p.low_stock_qty)}`}
+                </div>
               </div>
             </div>
             <div className="tiny muted" style={{ marginTop: 6 }}>
-              {p.variants.map((v) => `${v.ml ? `${v.ml}ml` : v.label} ${money(v.price)}`).join('  ·  ')}
+              {p.variants
+                .map((v) => `${v.ml === 180 ? '180ml full' : v.ml ? `${v.ml}ml` : v.label} ${money(v.price)}`)
+                .join('  ·  ')}
             </div>
             {canManage ? (
               <div className="row" style={{ marginTop: 8 }}>
@@ -254,29 +278,24 @@ export default function Products({ data, user, notify, refresh, online }) {
                   value={edit.unit_type}
                   onChange={(e) => setEdit({ ...edit, unit_type: e.target.value })}
                 >
-                  <option value="ml">Liquor (ml pours)</option>
+                  <option value="ml">Liquor (180 ml bottles)</option>
                   <option value="unit">Unit (bottle/plate)</option>
                 </select>
               </div>
               <div className="field">
-                <label htmlFor="pbottle">Bottle size (ml)</label>
-                <input
-                  id="pbottle"
-                  className="input"
-                  type="number"
-                  value={edit.bottle_size_ml}
-                  onChange={(e) => setEdit({ ...edit, bottle_size_ml: e.target.value })}
-                />
+                <label htmlFor="pbottle">Bottle size (ml) — fixed at 180</label>
+                <input id="pbottle" className="input" type="number" value={180} readOnly disabled />
               </div>
             </div>
             {!edit.id ? (
               <div className="grid-2">
                 <div className="field">
-                  <label htmlFor="pstock">Opening stock</label>
+                  <label htmlFor="pstock">Opening stock (180 ml bottles)</label>
                   <input
                     id="pstock"
                     className="input"
                     type="number"
+                    step="0.5"
                     value={edit.stock_qty}
                     onChange={(e) => setEdit({ ...edit, stock_qty: e.target.value })}
                   />
@@ -294,7 +313,7 @@ export default function Products({ data, user, notify, refresh, online }) {
               </div>
             ) : (
               <div className="field">
-                <label htmlFor="plow">Low stock alert (ml/units)</label>
+                <label htmlFor="plow">Low stock alert (bottles / units)</label>
                 <input
                   id="plow"
                   className="input"
@@ -345,18 +364,24 @@ export default function Products({ data, user, notify, refresh, online }) {
               </button>
             </div>
             <p className="small muted">
-              {stockFor.product.name} — current {Math.floor(stockFor.product.stock_qty)}{' '}
-              {stockFor.product.unit_type === 'ml' ? 'ml' : 'units'}
+              {stockFor.product.name} — current{' '}
+              {stockFor.product.unit_type === 'ml'
+                ? `${bottleLabel(stockFor.product).total} bottles (${bottleLabel(stockFor.product).sealed} sealed)`
+                : `${Math.floor(Number(stockFor.product.stock_qty) || 0)} units`}
             </p>
             <div className="field">
-              <label htmlFor="qty">Quantity to add (use minus to remove)</label>
+              <label htmlFor="qty">
+                {stockFor.product.unit_type === 'ml'
+                  ? 'Bottles to add (180 ml each; use minus to remove)'
+                  : 'Quantity to add (use minus to remove)'}
+              </label>
               <input
                 id="qty"
                 className="input"
                 type="number"
                 value={stockFor.change}
                 onChange={(e) => setStockFor({ ...stockFor, change: e.target.value })}
-                placeholder={stockFor.product.unit_type === 'ml' ? 'e.g. 750' : 'e.g. 12'}
+                placeholder={stockFor.product.unit_type === 'ml' ? 'e.g. 12 bottles' : 'e.g. 12'}
               />
             </div>
             <div className="field">
