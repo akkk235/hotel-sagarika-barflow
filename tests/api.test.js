@@ -145,10 +145,10 @@ test('cash bill deducts stock automatically', async () => {
   assert.equal(before - after, 60, 'two 30ml pours should deduct 60ml');
 
   const ledger = db
-    .prepare("SELECT * FROM stock_ledger WHERE product_id = ? AND reason = 'sale' ORDER BY id DESC LIMIT 1")
+    .prepare("SELECT * FROM stock_ledger WHERE product_id = ? AND movement = 'sale' ORDER BY id DESC LIMIT 1")
     .get(liquor.id);
   assert.ok(ledger, 'stock ledger should record the sale');
-  assert.equal(ledger.qty_change, -60);
+  assert.equal(ledger.change_qty, -60);
 });
 
 test('replaying the same offline bill is idempotent (no double stock deduction)', async () => {
@@ -248,7 +248,7 @@ test('table management: open a tab, add pours, settle with UPI', async () => {
 test('table status can be set to reserved', async () => {
   const tables = (await call('GET', '/api/tables', { token: tokens.staff })).body.tables;
   const target = tables.find((t) => t.status === 'free');
-  const res = await call('PATCH', `/api/tables/${target.id}`, { token: tokens.staff, body: { status: 'reserved' } });
+  const res = await call('POST', `/api/tables/${target.id}/status`, { token: tokens.staff, body: { status: 'reserved' } });
   assert.equal(res.status, 200);
   assert.equal(res.body.table.status, 'reserved');
 });
@@ -277,14 +277,14 @@ test('staff cannot manage products, manager can', async () => {
 test('stock adjustment writes a ledger entry', async () => {
   const res = await call('POST', `/api/products/${liquor.id}/stock`, {
     token: tokens.manager,
-    body: { qty_change: 750, reason: 'purchase', note: 'Test restock' },
+    body: { change_qty: 750, movement: 'purchase', note: 'Test restock' },
   });
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.ok(res.body.product.stock_qty >= 750);
   const row = db
-    .prepare("SELECT * FROM stock_ledger WHERE product_id = ? AND reason = 'purchase' ORDER BY id DESC LIMIT 1")
+    .prepare("SELECT * FROM stock_ledger WHERE product_id = ? AND movement = 'purchase' ORDER BY id DESC LIMIT 1")
     .get(liquor.id);
-  assert.equal(row.qty_change, 750);
+  assert.equal(row.change_qty, 750);
 });
 
 test('reports reflect the bills created above', async () => {
@@ -330,7 +330,7 @@ test('offline sync endpoint reports queued bills as already synced', async () =>
   assert.ok(Array.isArray(res.body.products));
   assert.ok(res.body.server_time);
 
-  const push = await call('POST', '/api/sync/bills', {
+  const push = await call('POST', '/api/sync/push', {
     token: tokens.staff,
     body: {
       device_id: 'test-device',
@@ -347,7 +347,7 @@ test('offline sync endpoint reports queued bills as already synced', async () =>
     },
   });
   assert.ok([200, 201].includes(push.status), JSON.stringify(push.body));
-  const again = await call('POST', '/api/sync/bills', {
+  const again = await call('POST', '/api/sync/push', {
     token: tokens.staff,
     body: {
       device_id: 'test-device',
