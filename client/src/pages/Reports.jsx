@@ -5,8 +5,14 @@ const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const monthStart = () => `${todayStr().slice(0, 7)}-01`;
 
-export default function Reports({ data, notify, online, user }) {
+export default function Reports({ data, notify, online, user, refresh }) {
   const [date, setDate] = useState(todayStr());
+  const isOwner = user?.role === 'owner';
+  const [deletions, setDeletions] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [pin, setPin] = useState('');
+  const [reason, setReason] = useState('');
+  const [deleting, setDeleting] = useState(false);
   const [dash, setDash] = useState(null);
   const [sales, setSales] = useState(null);
   const [items, setItems] = useState(null);
@@ -16,6 +22,44 @@ export default function Reports({ data, notify, online, user }) {
   const [busy, setBusy] = useState(false);
   const [expForm, setExpForm] = useState({ category: 'Purchase', amount: '', note: '' });
   const canExpense = ['owner', 'manager'].includes(user?.role);
+
+  const loadDeletions = useCallback(async () => {
+    if (!online) return;
+    try {
+      setDeletions(await api('/bills/deleted'));
+    } catch {
+      setDeletions(null);
+    }
+  }, [online]);
+
+  useEffect(() => {
+    loadDeletions();
+  }, [loadDeletions]);
+
+  function closeDelete() {
+    setDeleteTarget(null);
+    setPin('');
+    setReason('');
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await api(`/bills/${deleteTarget.id}`, {
+        method: 'DELETE',
+        body: { pin: pin.trim(), reason: reason.trim() || null },
+      });
+      notify(`Bill ${deleteTarget.bill_no} deleted`, 'ok');
+      closeDelete();
+      await loadDeletions();
+      if (refresh) await refresh();
+    } catch (err) {
+      notify(err.message, 'error');
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   const load = useCallback(async () => {
     if (!online) return;
@@ -144,14 +188,6 @@ export default function Reports({ data, notify, online, user }) {
               <span className="muted small">Bills</span>
               <span>{sales?.totals?.bills ?? 0}</span>
             </div>
-            <div className="row between">
-              <span className="muted small">GST collected</span>
-              <span>{money(sales?.totals?.tax)}</span>
-            </div>
-            <div className="row between">
-              <span className="muted small">Discounts</span>
-              <span>{money(sales?.totals?.discount)}</span>
-            </div>
           </div>
 
           <div className="card">
@@ -167,11 +203,101 @@ export default function Reports({ data, notify, online, user }) {
                       {b.table_label} · {String(b.payment_mode).toUpperCase()} · {b.cashier_name}
                     </div>
                   </div>
-                  <strong className="small">{money(b.total)}</strong>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <strong className="small">{money(b.total)}</strong>
+                    {isOwner && b.status === 'paid' && !b.deleted_at ? (
+                      <button className="btn btn-sm" type="button" onClick={() => setDeleteTarget(b)}>
+                        Delete
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               ))
             )}
           </div>
+
+          <div className="card">
+            <div className="row between">
+              <strong className="small">Deleted bills</strong>
+              <span className="tiny muted">{deletions?.totals?.count ?? 0} record(s)</span>
+            </div>
+            <p className="tiny muted">
+              Deleted bills are kept for financial tracking and are not counted as active sales.
+            </p>
+            {(deletions?.deletions || []).length === 0 ? (
+              <p className="tiny muted">No bills have been deleted.</p>
+            ) : (
+              (deletions?.deletions || []).map((d) => (
+                <div key={d.id} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+                  <div className="row between">
+                    <span className="small">{d.bill_no}</span>
+                    <strong className="small">{money(d.amount)}</strong>
+                  </div>
+                  <div className="tiny muted">
+                    Bill date {d.bill_date} · deleted by {d.deleted_by_name} on{' '}
+                    {String(d.deleted_at).replace('T', ' ').slice(0, 16)}
+                    {d.reason ? ` · ${d.reason}` : ''}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {deleteTarget ? (
+            <div className="sheet-backdrop" onClick={closeDelete}>
+              <div className="sheet" onClick={(e) => e.stopPropagation()}>
+                <div className="sheet-head">
+                  <h3>Delete bill?</h3>
+                  <button className="btn btn-sm" type="button" onClick={closeDelete}>
+                    ✕
+                  </button>
+                </div>
+                <div className="card" style={{ margin: 0 }}>
+                  <div className="row between">
+                    <span className="small">{deleteTarget.bill_no}</span>
+                    <strong>{money(deleteTarget.total)}</strong>
+                  </div>
+                  <p className="tiny muted">
+                    {deleteTarget.table_label} · {deleteTarget.bill_date} · Only the Owner can delete a bill.
+                  </p>
+                  <p className="tiny muted">
+                    The bill stops counting as a sale, stock is returned and a permanent record is kept.
+                  </p>
+                  <div className="field">
+                    <label htmlFor="ownerpin">Owner PIN</label>
+                    <input
+                      id="ownerpin"
+                      className="input"
+                      type="password"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={pin}
+                      onChange={(e) => setPin(e.target.value)}
+                      placeholder="4–8 digit PIN"
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="delreason">Reason (optional)</label>
+                    <input
+                      id="delreason"
+                      className="input"
+                      value={reason}
+                      onChange={(e) => setReason(e.target.value)}
+                    />
+                  </div>
+                  <button
+                    className="btn btn-block"
+                    type="button"
+                    style={{ background: '#b3261e', color: '#fff' }}
+                    onClick={confirmDelete}
+                    disabled={deleting || pin.trim().length < 4}
+                  >
+                    {deleting ? 'Deleting…' : 'Confirm delete'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           <div className="card">
             <strong className="small">Last 7 days</strong>
