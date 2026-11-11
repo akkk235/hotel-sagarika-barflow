@@ -206,7 +206,7 @@ export function seedIfEmpty() {
 
 /**
  * Guarantees exactly 20 restaurant tables labelled T1..T20.
- * Legacy G*/L* tables are renamed in place (history kept) and any surplus removed.
+ * Legacy G-series and L-series tables are renamed in place (history kept) and any surplus removed.
  */
 export function ensureDiningTables() {
   const rows = db.prepare('SELECT id, label FROM dining_tables ORDER BY sort_order, id').all();
