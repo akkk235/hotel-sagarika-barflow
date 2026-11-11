@@ -206,7 +206,9 @@ export default function App() {
         {tab === 'products' ? (
           <Products data={data} user={user} notify={notify} refresh={refresh} online={online} />
         ) : null}
-        {tab === 'reports' ? <Reports data={data} notify={notify} online={online} user={user} /> : null}
+        {tab === 'reports' ? (
+          <Reports data={data} notify={notify} online={online} user={user} refresh={refresh} />
+        ) : null}
         {tab === 'more' ? (
           <More
             data={data}
