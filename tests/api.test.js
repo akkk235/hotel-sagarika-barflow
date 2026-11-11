@@ -274,7 +274,8 @@ test('bill totals add lines and reject an underpayment', async () => {
   assert.equal(bill.subtotal, 360);
   assert.equal(bill.tax_amount, 0);
   assert.equal(bill.total, 360);
-  assert.equal(bill.cash_amount, 1000);
+  assert.equal(bill.cash_amount, 360);
+  assert.equal(bill.cash_received, 1000);
   assert.ok(bill.bill_no.startsWith('INV-'));
 
   const short = await call('POST', '/api/bills', {
@@ -381,9 +382,13 @@ test('stock entry is counted in 180 ml bottles and managers can restock', async 
     body: { change_qty: 12, movement: 'purchase', note: '12 sealed bottles received' },
   });
   assert.equal(res.status, 200, res.text);
-  assert.equal(res.body.product.stock_bottles, before + 12);
-  assert.equal(res.body.product.sealed_bottles, before + 12);
-  assert.ok(Math.abs(res.body.product.stock_qty - (before + 12) * 180) < 0.01);
+  const expectedBottles = before + 12;
+  assert.equal(res.body.product.stock_bottles, expectedBottles);
+  assert.equal(res.body.product.sealed_bottles, Math.floor(expectedBottles));
+  assert.ok(
+    Math.abs(res.body.product.loose_ml - (expectedBottles - Math.floor(expectedBottles)) * 180) < 0.01,
+  );
+  assert.ok(Math.abs(res.body.product.stock_qty - expectedBottles * 180) < 0.01);
 });
 
 test('staff cannot create products or restock', async () => {
