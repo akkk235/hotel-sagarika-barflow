@@ -3,6 +3,16 @@ import { api, enqueue, uuid } from '../api.js';
 
 const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const BOTTLE_ML = 180;
+// Liquor stock is held in sealed 180 ml bottles; pours consume a fraction of one.
+const bottlesOf = (p) =>
+  Number(p.stock_bottles ?? (p.unit_type === 'ml' ? Number(p.stock_qty) / BOTTLE_ML : Number(p.stock_qty))) || 0;
+const bottleText = (p) => {
+  const total = bottlesOf(p);
+  const sealed = Math.floor(total + 1e-9);
+  const loose = Math.round((total - sealed) * BOTTLE_ML);
+  return `${total.toFixed(2)} bottles left (${sealed} sealed${loose ? `, ${loose} ml loose` : ''})`;
+};
 
 export default function Billing({ data, settings, user, online, notify, refresh, activeTab, setActiveTab }) {
   const products = data?.products || [];
@@ -57,15 +67,15 @@ export default function Billing({ data, settings, user, online, notify, refresh,
 
   function stockLabel(product, variant) {
     if (product.unit_type === 'ml') {
-      const serves = variant.consume_qty > 0 ? Math.floor(product.stock_qty / variant.consume_qty) : 0;
+      const serves = variant.consume_qty > 0 ? Math.floor((bottlesOf(product) * BOTTLE_ML) / variant.consume_qty) : 0;
       return `${serves} left`;
     }
-    return `${Math.floor(product.stock_qty)} left`;
+    return `${Math.floor(bottlesOf(product))} left`;
   }
 
   function openProduct(product) {
     const firstInStock =
-      product.variants.find((v) => product.stock_qty >= (v.consume_qty || 0)) || product.variants[0];
+      product.variants.find((v) => bottlesOf(product) * BOTTLE_ML >= (v.consume_qty || 0)) || product.variants[0];
     setPick({ product, variantId: firstInStock?.id, qty: 1 });
   }
 
@@ -342,7 +352,7 @@ export default function Billing({ data, settings, user, online, notify, refresh,
               <div>
                 <h3>{pick.product.name}</h3>
                 <div className="tiny muted">
-                  {pick.product.category_name} · {pick.product.unit_type === 'ml' ? `${Math.floor(pick.product.stock_qty)} ml in stock` : `${Math.floor(pick.product.stock_qty)} units in stock`}
+                  {pick.product.category_name} · {pick.product.unit_type === 'ml' ? bottleText(pick.product) : `${Math.floor(bottlesOf(pick.product))} units in stock`}
                 </div>
               </div>
               <button className="btn btn-sm" type="button" onClick={() => setPick(null)}>
@@ -355,7 +365,7 @@ export default function Billing({ data, settings, user, online, notify, refresh,
             </div>
             <div className="pour-grid">
               {pick.product.variants.map((v) => {
-                const out = pick.product.unit_type === 'ml' ? pick.product.stock_qty < v.consume_qty : pick.product.stock_qty < 1;
+                const out = pick.product.unit_type === 'ml' ? bottlesOf(pick.product) * BOTTLE_ML < v.consume_qty : bottlesOf(pick.product) < 1;
                 return (
                   <button
                     key={v.id}
