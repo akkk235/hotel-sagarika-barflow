@@ -59,9 +59,8 @@ router.get('/sales', authenticate, (req, res) => {
     .prepare(
       `SELECT bill_date AS date, COUNT(*) AS bills, COALESCE(SUM(total),0) AS revenue,
               COALESCE(SUM(cash_amount),0) AS cash, COALESCE(SUM(upi_amount),0) AS upi,
-              COALESCE(SUM(card_amount),0) AS card, COALESCE(SUM(discount),0) AS discount,
-              COALESCE(SUM(tax_amount),0) AS tax
-       FROM bills WHERE status = 'paid' AND bill_date BETWEEN ? AND ?
+              COALESCE(SUM(card_amount),0) AS card
+       FROM bills WHERE status = 'paid' AND deleted_at IS NULL AND bill_date BETWEEN ? AND ?
        GROUP BY bill_date ORDER BY bill_date DESC`,
     )
     .all(from, to);
@@ -72,15 +71,13 @@ router.get('/sales', authenticate, (req, res) => {
       cash: money(acc.cash + d.cash),
       upi: money(acc.upi + d.upi),
       card: money(acc.card + d.card),
-      tax: money(acc.tax + d.tax),
-      discount: money(acc.discount + d.discount),
     }),
-    { bills: 0, revenue: 0, cash: 0, upi: 0, card: 0, tax: 0, discount: 0 },
+    { bills: 0, revenue: 0, cash: 0, upi: 0, card: 0 },
   );
   const byMode = db
     .prepare(
       `SELECT payment_mode AS mode, COUNT(*) AS bills, COALESCE(SUM(total),0) AS amount
-       FROM bills WHERE status = 'paid' AND bill_date BETWEEN ? AND ?
+       FROM bills WHERE status = 'paid' AND deleted_at IS NULL AND bill_date BETWEEN ? AND ?
        GROUP BY payment_mode ORDER BY amount DESC`,
     )
     .all(from, to);

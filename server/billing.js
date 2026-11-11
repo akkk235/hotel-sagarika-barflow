@@ -42,26 +42,11 @@ export function resolveItems(rawItems) {
   return lines;
 }
 
-export function computeTotals({ lines, discount = 0, taxPercent, servicePercent }) {
+export function computeTotals({ lines }) {
+  // No GST, tax, service charge, discount or rounding: a bill is exactly the sum
+  // of its line prices, so what the guest is quoted is what they pay.
   const subtotal = money(lines.reduce((sum, l) => sum + l.line_total, 0));
-  const disc = Math.min(money(discount), subtotal);
-  const taxable = money(subtotal - disc);
-  const taxRate = taxPercent ?? Number(getSetting('tax_percent', '5'));
-  const taxAmount = money((taxable * taxRate) / 100);
-  const serviceRate = servicePercent ?? Number(getSetting('service_charge_percent', '0'));
-  const serviceCharge = money((taxable * serviceRate) / 100);
-  const gross = money(taxable + taxAmount + serviceCharge);
-  const rounded = Math.round(gross);
-  const roundOff = money(rounded - gross);
-  return {
-    subtotal,
-    discount: disc,
-    tax_percent: taxRate,
-    tax_amount: taxAmount,
-    service_charge: serviceCharge,
-    round_off: roundOff,
-    total: money(rounded),
-  };
+  return { subtotal, total: subtotal };
 }
 
 function splitPayment(payload, total) {
@@ -223,12 +208,7 @@ export const createBill = db.transaction(({ user, payload, deviceId = null, offl
   const now = nowISO();
   const billDate = payload.bill_date || localDate(payload.paid_at || now);
   const lines = resolveItems(payload.items);
-  const totals = computeTotals({
-    lines,
-    discount: payload.discount || 0,
-    taxPercent: payload.tax_percent,
-    servicePercent: payload.service_charge_percent,
-  });
+  const totals = computeTotals({ lines });
   const split = splitPayment(payload, totals.total);
 
   let table = null;
@@ -286,10 +266,10 @@ export const createBill = db.transaction(({ user, payload, deviceId = null, offl
   const billRes = db
     .prepare(
       `INSERT INTO bills (bill_no, bill_date, order_id, table_id, table_label, customer_name, customer_phone,
-        subtotal, discount, tax_percent, tax_amount, service_charge, round_off, total, payment_mode,
+        subtotal, total, payment_mode,
         cash_amount, upi_amount, card_amount, cash_received, change_returned, upi_ref, status,
         cashier_id, cashier_name, device_id, client_uuid, synced_from_offline, notes, created_at, paid_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       billNo,
@@ -300,11 +280,6 @@ export const createBill = db.transaction(({ user, payload, deviceId = null, offl
       payload.customer_name || null,
       payload.customer_phone || null,
       totals.subtotal,
-      totals.discount,
-      totals.tax_percent,
-      totals.tax_amount,
-      totals.service_charge,
-      totals.round_off,
       totals.total,
       split.mode,
       split.cash,
@@ -387,13 +362,59 @@ export const voidBill = db.transaction((billId, user, reason) => {
   return db.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
 });
 
+/**
+ * Owner-only soft delete of a bill. The bill row, its items and its payment
+ * records are kept forever; only the flags change so the bill stops counting as
+ * an active sale. Stock taken by the bill is returned to the shelf.
+ */
+export const deleteBill = db.transaction((billId, user, reason = null) => {
+  const bill = db.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
+  if (!bill) throw new HttpError(404, 'Bill not found');
+  if (user.role !== 'owner') throw new HttpError(403, 'Only the Owner can delete a bill');
+  if (bill.deleted_at) throw new HttpError(400, 'This bill is already deleted');
+
+  const now = nowISO();
+  const payments = db.prepare('SELECT * FROM payments WHERE bill_id = ?').all(billId);
+  const items = bill.order_id
+    ? db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id').all(bill.order_id)
+    : [];
+  const snapshot = JSON.stringify({ bill, items, payments });
+
+  restoreStock(bill, user.id);
+  db.prepare(
+    `UPDATE bills SET status = 'void', deleted_at = ?, deleted_by = ?, deleted_by_name = ?, delete_reason = ?
+      WHERE id = ?`,
+  ).run(now, user.id, user.name, reason, billId);
+  if (bill.order_id) {
+    db.prepare(`UPDATE orders SET status = 'void', updated_at = ? WHERE id = ?`).run(now, bill.order_id);
+  }
+  const record = db
+    .prepare(
+      `INSERT INTO bill_deletions (bill_id, bill_no, bill_date, amount, payment_mode, status_before,
+         deleted_by, deleted_by_name, deleted_at, reason, snapshot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(billId, bill.bill_no, bill.bill_date, bill.total, bill.payment_mode, bill.status,
+      user.id, user.name, now, reason, snapshot);
+  audit(user, 'bill.delete', 'bill', billId, {
+    bill_no: bill.bill_no,
+    bill_date: bill.bill_date,
+    amount: bill.total,
+    reason,
+  });
+  return {
+    deleted: true,
+    bill: db.prepare('SELECT * FROM bills WHERE id = ?').get(billId),
+    deletion: db.prepare('SELECT * FROM bill_deletions WHERE id = ?').get(record.lastInsertRowid),
+  };
+});
+
 export function dashboardSummary(date = today()) {
   const sales = db
     .prepare(
       `SELECT COUNT(*) AS bills, COALESCE(SUM(total),0) AS revenue, COALESCE(SUM(cash_amount),0) AS cash,
-              COALESCE(SUM(upi_amount),0) AS upi, COALESCE(SUM(card_amount),0) AS card,
-              COALESCE(SUM(discount),0) AS discount, COALESCE(SUM(tax_amount),0) AS tax
-       FROM bills WHERE bill_date = ? AND status = 'paid'`,
+              COALESCE(SUM(upi_amount),0) AS upi, COALESCE(SUM(card_amount),0) AS card
+       FROM bills WHERE bill_date = ? AND status = 'paid' AND deleted_at IS NULL`,
     )
     .get(date);
   const items = db
@@ -418,5 +439,20 @@ export function dashboardSummary(date = today()) {
   const expenses = db
     .prepare('SELECT COALESCE(SUM(amount),0) AS total FROM expenses WHERE expense_date = ?')
     .get(date).total;
-  return { date, ...sales, pours: items.pours, tables, low_stock: lowStock, expenses };
+  const deleted = db
+    .prepare(
+      `SELECT COUNT(*) AS bills, COALESCE(SUM(total),0) AS amount FROM bills
+       WHERE bill_date = ? AND deleted_at IS NOT NULL`,
+    )
+    .get(date);
+  return {
+    date,
+    ...sales,
+    pours: items.pours,
+    tables,
+    low_stock: lowStock,
+    expenses,
+    deleted_bills: deleted.bills,
+    deleted_amount: money(deleted.amount),
+  };
 }
