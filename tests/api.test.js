@@ -13,7 +13,7 @@ const { createApp } = await import('../server/app.js');
 const { db } = await import('../server/db.js');
 
 const app = createApp();
-const server = app.listen(0, '127.0.0.1');
+const server = app.listen(0, '0.0.0.0');
 await new Promise((resolve) => server.once('listening', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
