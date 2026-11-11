@@ -278,7 +278,7 @@ test('bill totals add lines and reject an underpayment', async () => {
   assert.equal(bill.total, 360);
   assert.equal(bill.cash_amount, 360);
   assert.equal(bill.cash_received, 1000);
-  assert.ok(bill.bill_no.startsWith('INV-'));
+  assert.match(bill.bill_no, /^[A-Z]{2,6}-\d+/, 'bill numbers carry a document prefix');
 
   const short = await call('POST', '/api/bills', {
     token: tokens.staff,
@@ -471,7 +471,7 @@ test('stock entry is counted in 180 ml bottles and managers can restock', async 
   assert.equal(res.body.product.stock_bottles, expectedBottles);
   assert.equal(res.body.product.sealed_bottles, Math.floor(expectedBottles));
   const loose = res.body.product.loose_ml ?? Math.round((expectedBottles - Math.floor(expectedBottles)) * 180);
-  assert.ok(Math.abs(loose - (expectedBottles - Math.floor(expectedBottles)) * 180) < 0.01);
+  assert.equal(loose, Math.round((expectedBottles - Math.floor(expectedBottles)) * 180));
   assert.ok(Math.abs(res.body.product.stock_qty - expectedBottles * 180) < 0.01);
 });
 
