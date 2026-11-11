@@ -100,16 +100,18 @@ export function seedIfEmpty() {
     insertUser.run(u.name, u.username, bcrypt.hashSync(u.password, 10), u.role, u.phone, now, now);
   }
 
+  // Owner PIN for destructive actions such as bill deletion. Change it in More → Security.
+  db.prepare("UPDATE users SET pin_hash = ? WHERE role = 'owner' AND pin_hash IS NULL").run(
+    bcrypt.hashSync('4321', 10),
+  );
+
   const defaults = {
     hotel_name: 'Hotel Sagarika',
     tagline: 'Bar, Restaurant & Lodging',
     address: 'Main Road, Sagarika Complex, Mangaluru',
     phone: '9876500000',
-    gstin: '29ABCDE1234F1Z5',
     upi_id: 'hotelsagarika@upi',
     currency: '₹',
-    tax_percent: '5',
-    service_charge_percent: '0',
     allow_negative_stock: '1',
     low_stock_alert: '1',
     invoice_footer: 'Thank you for visiting Hotel Sagarika. Drink responsibly.',

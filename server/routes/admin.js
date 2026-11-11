@@ -1,10 +1,29 @@
 import express from 'express';
 import { db, audit, getSettings, setSetting } from '../db.js';
-import { authenticate, manager, hashPassword, requireRole } from '../auth.js';
+import { authenticate, manager, hashPassword, hashPin, verifyOwnerPin, requireRole } from '../auth.js';
 import { HttpError, money, nowISO, toNum } from '../util.js';
 
 const router = express.Router();
 const owner = requireRole('owner');
+
+// ---------- Owner PIN (authorises bill deletion) ----------
+router.get('/pin', authenticate, owner, (req, res) => {
+  const row = db.prepare('SELECT pin_hash FROM users WHERE id = ?').get(req.user.id);
+  res.json({ pin_set: Boolean(row?.pin_hash) });
+});
+
+router.put('/pin', authenticate, owner, (req, res) => {
+  const pin = String(req.body?.pin ?? '').trim();
+  if (!/^\d{4,8}$/.test(pin)) throw new HttpError(400, 'PIN must be 4 to 8 digits');
+  const row = db.prepare('SELECT pin_hash FROM users WHERE id = ?').get(req.user.id);
+  if (row?.pin_hash) {
+    const check = verifyOwnerPin(req.user, req.body?.current_pin);
+    if (!check.ok) throw new HttpError(check.status, check.message);
+  }
+  db.prepare('UPDATE users SET pin_hash = ?, updated_at = ? WHERE id = ?').run(hashPin(pin), nowISO(), req.user.id);
+  audit(req.user, 'user.pin.update', 'user', req.user.id, {});
+  res.json({ ok: true, pin_set: true });
+});
 
 // ---------- Users ----------
 router.get('/users', authenticate, manager, (req, res) => {
