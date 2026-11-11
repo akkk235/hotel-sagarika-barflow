@@ -2,7 +2,19 @@ import bcrypt from 'bcryptjs';
 import { db, setSetting } from './db.js';
 import { nowISO, today, money } from './util.js';
 
-const POUR_SIZES = [30, 60, 90, 120, 150, 180];
+/**
+ * Liquor is purchased and stocked only in sealed 180 ml bottles.
+ * Loose pours are 30/60/90/120/150 ml; the full sealed bottle is 180 ml.
+ */
+export const BOTTLE_SIZE_ML = 180;
+export const POUR_SIZES = [
+  { ml: 30, label: '30 ml' },
+  { ml: 60, label: '60 ml' },
+  { ml: 90, label: '90 ml' },
+  { ml: 120, label: '120 ml' },
+  { ml: 150, label: '150 ml' },
+  { ml: 180, label: '180 ml (full bottle)' },
+];
 
 const CATEGORIES = [
   { name: 'Whisky', color: '#b45309', sort_order: 1 },
@@ -15,20 +27,21 @@ const CATEGORIES = [
   { name: 'Mixers & Snacks', color: '#4d7c0f', sort_order: 8 },
 ];
 
-// peg = price of a 30 ml pour in INR. Larger pours scale linearly.
+// peg = price of a 30 ml pour in INR. Larger pours scale from it, and every size
+// keeps its own editable price in product_variants.
 const LIQUOR = [
-  { name: 'Blenders Pride Reserve', brand: 'Blenders Pride', cat: 'Whisky', bottle: 750, stockMl: 15000, cost: 640, peg: 70 },
-  { name: 'Royal Stag Barrel Select', brand: 'Royal Stag', cat: 'Whisky', bottle: 750, stockMl: 22500, cost: 520, peg: 60 },
-  { name: "Officer's Choice", brand: "Officer's Choice", cat: 'Whisky', bottle: 750, stockMl: 30000, cost: 380, peg: 45 },
-  { name: 'Johnnie Walker Red Label', brand: 'Johnnie Walker', cat: 'Whisky', bottle: 750, stockMl: 4500, cost: 2100, peg: 180 },
-  { name: 'Signature Rare Aged', brand: 'Signature', cat: 'Whisky', bottle: 750, stockMl: 9000, cost: 850, peg: 90 },
-  { name: 'Old Monk Legend', brand: 'Old Monk', cat: 'Rum', bottle: 750, stockMl: 18000, cost: 420, peg: 50 },
-  { name: 'Bacardi Carta Blanca', brand: 'Bacardi', cat: 'Rum', bottle: 750, stockMl: 9000, cost: 700, peg: 80 },
-  { name: 'Absolut Vodka', brand: 'Absolut', cat: 'Vodka', bottle: 750, stockMl: 6000, cost: 1250, peg: 110 },
-  { name: 'Magic Moments Grain', brand: 'Magic Moments', cat: 'Vodka', bottle: 750, stockMl: 12000, cost: 480, peg: 55 },
-  { name: 'Bombay Sapphire', brand: 'Bombay Sapphire', cat: 'Gin', bottle: 750, stockMl: 4500, cost: 1600, peg: 140 },
-  { name: 'Mansion House Brandy', brand: 'Mansion House', cat: 'Brandy', bottle: 750, stockMl: 15000, cost: 460, peg: 50 },
-  { name: 'McDowell No.1 Brandy', brand: 'McDowell', cat: 'Brandy', bottle: 750, stockMl: 12000, cost: 520, peg: 60 },
+  { name: 'Blenders Pride Reserve', brand: 'Blenders Pride', cat: 'Whisky', bottles: 10, cost: 420, peg: 70 },
+  { name: 'Royal Stag Barrel Select', brand: 'Royal Stag', cat: 'Whisky', bottles: 15, cost: 340, peg: 60 },
+  { name: "Officer's Choice", brand: "Officer's Choice", cat: 'Whisky', bottles: 20, cost: 250, peg: 45 },
+  { name: 'Johnnie Walker Red Label', brand: 'Johnnie Walker', cat: 'Whisky', bottles: 3, cost: 1450, peg: 180 },
+  { name: 'Signature Rare Aged', brand: 'Signature', cat: 'Whisky', bottles: 6, cost: 560, peg: 90 },
+  { name: 'Old Monk Legend', brand: 'Old Monk', cat: 'Rum', bottles: 12, cost: 280, peg: 50 },
+  { name: 'Bacardi Carta Blanca', brand: 'Bacardi', cat: 'Rum', bottles: 6, cost: 460, peg: 80 },
+  { name: 'Absolut Vodka', brand: 'Absolut', cat: 'Vodka', bottles: 4, cost: 820, peg: 110 },
+  { name: 'Magic Moments Grain', brand: 'Magic Moments', cat: 'Vodka', bottles: 8, cost: 320, peg: 55 },
+  { name: 'Bombay Sapphire', brand: 'Bombay Sapphire', cat: 'Gin', bottles: 3, cost: 1050, peg: 140 },
+  { name: 'Mansion House Brandy', brand: 'Mansion House', cat: 'Brandy', bottles: 10, cost: 300, peg: 50 },
+  { name: 'McDowell No.1 Brandy', brand: 'McDowell', cat: 'Brandy', bottles: 8, cost: 340, peg: 60 },
 ];
 
 const UNIT_PRODUCTS = [
@@ -43,10 +56,24 @@ const UNIT_PRODUCTS = [
   { name: 'Veg Manchurian', brand: 'Kitchen', cat: 'Mixers & Snacks', stock: 40, cost: 70, price: 180, label: 'Plate' },
 ];
 
-const TABLES = [
-  ...Array.from({ length: 8 }, (_, i) => ({ label: `T${i + 1}`, zone: 'Main Hall', capacity: 4 })),
-  ...Array.from({ length: 6 }, (_, i) => ({ label: `G${i + 1}`, zone: 'Garden', capacity: 6 })),
-  ...Array.from({ length: 6 }, (_, i) => ({ label: `L${i + 1}`, zone: 'AC Lounge', capacity: 8 })),
+/** Exactly 20 independent restaurant tables: T1 - T20. Lodging rooms are separate. */
+export const RESTAURANT_TABLES = Array.from({ length: 20 }, (_, i) => ({
+  label: `T${i + 1}`,
+  zone: i < 8 ? 'Main Hall' : i < 14 ? 'Garden' : 'AC Lounge',
+  capacity: i < 8 ? 4 : i < 14 ? 6 : 8,
+}));
+
+/** Exactly 9 lodging rooms: 101 - 109. Never counted as restaurant tables. */
+export const LODGING_ROOMS = [
+  { room_no: '101', name: 'Room 101', floor: 'First Floor', room_type: 'Standard', rate: 1500 },
+  { room_no: '102', name: 'Room 102', floor: 'First Floor', room_type: 'Standard', rate: 1500 },
+  { room_no: '103', name: 'Room 103', floor: 'First Floor', room_type: 'Deluxe', rate: 1800 },
+  { room_no: '104', name: 'Room 104', floor: 'First Floor', room_type: 'Deluxe', rate: 1800 },
+  { room_no: '105', name: 'Room 105', floor: 'First Floor', room_type: 'Deluxe', rate: 1800 },
+  { room_no: '106', name: 'Room 106', floor: 'Second Floor', room_type: 'Executive', rate: 2200 },
+  { room_no: '107', name: 'Room 107', floor: 'Second Floor', room_type: 'Executive', rate: 2200 },
+  { room_no: '108', name: 'Room 108', floor: 'Second Floor', room_type: 'Suite', rate: 2800 },
+  { room_no: '109', name: 'Room 109', floor: 'Second Floor', room_type: 'Suite', rate: 2800 },
 ];
 
 function skuFor(name, i) {
@@ -75,7 +102,7 @@ export function seedIfEmpty() {
 
   const defaults = {
     hotel_name: 'Hotel Sagarika',
-    tagline: 'Bar & Restaurant',
+    tagline: 'Bar, Restaurant & Lodging',
     address: 'Main Road, Sagarika Complex, Mangaluru',
     phone: '9876500000',
     gstin: '29ABCDE1234F1Z5',
@@ -100,9 +127,9 @@ export function seedIfEmpty() {
   }
 
   const insertProduct = db.prepare(
-    `INSERT INTO products (name, category_id, brand, sku, unit_type, bottle_size_ml, stock_qty,
+    `INSERT INTO products (name, category_id, brand, sku, unit_type, bottle_size_ml, stock_qty, stock_bottles,
        low_stock_qty, cost_price, is_active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
   );
   const insertVariant = db.prepare(
     `INSERT INTO product_variants (product_id, label, ml, consume_qty, price, sort_order, is_active, created_at)
@@ -121,18 +148,20 @@ export function seedIfEmpty() {
       p.brand,
       skuFor(p.name, idx++),
       'ml',
-      p.bottle,
-      p.stockMl,
-      1500,
+      BOTTLE_SIZE_ML,
+      money(p.bottles * BOTTLE_SIZE_ML), // ml mirror
+      p.bottles, // authoritative bottle count
+      2, // low-stock threshold in bottles
       p.cost,
       now,
       now,
     );
     const productId = Number(res.lastInsertRowid);
-    POUR_SIZES.forEach((ml, i) => {
-      insertVariant.run(productId, `${ml} ml`, ml, ml, money((p.peg * ml) / 30), i, now);
+    POUR_SIZES.forEach((pour, i) => {
+      // consume_qty is ml for liquor; the bill converts it to a bottle fraction.
+      insertVariant.run(productId, pour.label, pour.ml, pour.ml, money((p.peg * pour.ml) / 30), i, now);
     });
-    insertLedger.run(productId, p.stockMl, p.stockMl, 'Opening stock', now);
+    insertLedger.run(productId, p.bottles, p.bottles, 'Opening stock (180 ml bottles)', now);
   }
 
   for (const p of UNIT_PRODUCTS) {
@@ -144,6 +173,7 @@ export function seedIfEmpty() {
       'unit',
       null,
       p.stock,
+      0,
       10,
       p.cost,
       now,
@@ -158,7 +188,7 @@ export function seedIfEmpty() {
     `INSERT INTO dining_tables (label, zone, capacity, status, sort_order, updated_at)
      VALUES (?, ?, ?, 'free', ?, ?)`,
   );
-  TABLES.forEach((t, i) => insertTable.run(t.label, t.zone, t.capacity, i, now));
+  RESTAURANT_TABLES.forEach((t, i) => insertTable.run(t.label, t.zone, t.capacity, i, now));
 
   const insertSupplier = db.prepare(
     `INSERT INTO suppliers (name, phone, gstin, address, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
@@ -172,4 +202,58 @@ export function seedIfEmpty() {
   ).run(todayStr, now);
 
   return true;
+}
+
+/**
+ * Guarantees exactly 20 restaurant tables labelled T1..T20.
+ * Legacy G*/L* tables are renamed in place (history kept) and any surplus removed.
+ */
+export function ensureDiningTables() {
+  const rows = db.prepare('SELECT id, label FROM dining_tables ORDER BY sort_order, id').all();
+  const isCorrect = rows.length === RESTAURANT_TABLES.length && rows.every((r, i) => r.label === `T${i + 1}`);
+  if (isCorrect) return false;
+  const now = nowISO();
+  db.transaction(() => {
+    // two-phase rename so the UNIQUE(label) constraint is never violated
+    for (const row of rows) {
+      db.prepare('UPDATE dining_tables SET label = ? WHERE id = ?').run(`__migrating_${row.id}`, row.id);
+    }
+    rows.slice(0, RESTAURANT_TABLES.length).forEach((row, i) => {
+      const preset = RESTAURANT_TABLES[i];
+      db.prepare(
+        `UPDATE dining_tables SET label = ?, zone = COALESCE(NULLIF(zone, ''), ?), capacity = ?, sort_order = ?, updated_at = ?
+         WHERE id = ?`,
+      ).run(`T${i + 1}`, preset.zone, row.capacity ?? preset.capacity, i, now, row.id);
+    });
+    for (const extra of rows.slice(RESTAURANT_TABLES.length)) {
+      db.prepare('DELETE FROM dining_tables WHERE id = ?').run(extra.id);
+    }
+    const insert = db.prepare(
+      `INSERT INTO dining_tables (label, zone, capacity, status, sort_order, updated_at)
+       VALUES (?, ?, ?, 'free', ?, ?)`,
+    );
+    for (let i = rows.length; i < RESTAURANT_TABLES.length; i++) {
+      insert.run(`T${i + 1}`, RESTAURANT_TABLES[i].zone, RESTAURANT_TABLES[i].capacity, i, now);
+    }
+  })();
+  return true;
+}
+
+/** Guarantees the nine lodging rooms 101-109 exist and stay separate from restaurant tables. */
+export function ensureRooms() {
+  const now = nowISO();
+  const insert = db.prepare(
+    `INSERT INTO rooms (room_no, name, floor, room_type, rate_per_night, status, sort_order, updated_at, created_at)
+     VALUES (?, ?, ?, ?, ?, 'available', ?, ?, ?)
+     ON CONFLICT(room_no) DO NOTHING`,
+  );
+  db.transaction(() => {
+    LODGING_ROOMS.forEach((room, i) => {
+      insert.run(room.room_no, room.name, room.floor, room.room_type, room.rate, i, now, now);
+    });
+    const allowed = LODGING_ROOMS.map((r) => r.room_no);
+    db.prepare(
+      `DELETE FROM rooms WHERE room_no NOT IN (${allowed.map(() => '?').join(',')}) AND current_stay_id IS NULL`,
+    ).run(...allowed);
+  })();
 }
