@@ -1,5 +1,5 @@
 FROM node:26-alpine AS build
-RUN apk upgrade --no-cache
+RUN apk upgrade --no-cache && apk add --no-cache python3 make g++
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
