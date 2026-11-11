@@ -11,11 +11,15 @@ db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
 
 /**
- * Hotel Sagarika BarFlow schema - exactly 20 tables.
- * 1 users, 2 sessions, 3 categories, 4 products, 5 product_variants,
- * 6 suppliers, 7 purchases, 8 purchase_items, 9 stock_ledger, 10 dining_tables,
- * 11 table_sessions, 12 orders, 13 order_items, 14 bills, 15 payments,
- * 16 customers, 17 expenses, 18 sync_log, 19 settings, 20 audit_logs
+ * Hotel Sagarika BarFlow schema.
+ * Restaurant POS: users, sessions, categories, products, product_variants,
+ * suppliers, purchases, purchase_items, stock_ledger, dining_tables (20), table_sessions,
+ * orders, order_items, bills, payments, customers, expenses, sync_log, settings, audit_logs.
+ * Lodging: rooms (9), room_stays (occupancy history).
+ *
+ * Liquor rule: stock is held in sealed 180 ml bottles. `stock_bottles` is authoritative
+ * for ml products; `stock_qty` mirrors the ml equivalent (stock_bottles * bottle_size_ml)
+ * so existing reports keep working.
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -269,7 +273,50 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS rooms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_no TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  floor TEXT NOT NULL DEFAULT 'First Floor',
+  room_type TEXT NOT NULL DEFAULT 'Standard',
+  rate_per_night REAL NOT NULL DEFAULT 1500,
+  status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available','occupied','maintenance')),
+  current_stay_id INTEGER,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS room_stays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  guest_name TEXT NOT NULL,
+  guest_phone TEXT,
+  guest_id_proof TEXT,
+  guests INTEGER NOT NULL DEFAULT 1,
+  check_in_at TEXT NOT NULL,
+  expected_check_out_at TEXT,
+  check_out_at TEXT,
+  rate_per_night REAL NOT NULL DEFAULT 0,
+  nights INTEGER NOT NULL DEFAULT 1,
+  room_charges REAL NOT NULL DEFAULT 0,
+  extra_charges REAL NOT NULL DEFAULT 0,
+  total_charges REAL NOT NULL DEFAULT 0,
+  amount_paid REAL NOT NULL DEFAULT 0,
+  payment_mode TEXT,
+  status TEXT NOT NULL DEFAULT 'in_house' CHECK (status IN ('in_house','checked_out','cancelled')),
+  notes TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_by_name TEXT,
+  checked_out_by INTEGER REFERENCES users(id),
+  checked_out_by_name TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
+CREATE INDEX IF NOT EXISTS idx_room_stays_room ON room_stays(room_id);
+CREATE INDEX IF NOT EXISTS idx_room_stays_status ON room_stays(status);
 CREATE INDEX IF NOT EXISTS idx_variants_product ON product_variants(product_id);
 CREATE INDEX IF NOT EXISTS idx_bills_date ON bills(bill_date);
 CREATE INDEX IF NOT EXISTS idx_bills_status ON bills(status);
@@ -280,6 +327,43 @@ CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
 `;
 
 db.exec(SCHEMA);
+
+function hasColumn(table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+}
+
+// v2 migration: liquor is purchased, stocked and sold from sealed 180 ml bottles.
+if (!hasColumn('products', 'stock_bottles')) {
+  db.exec('ALTER TABLE products ADD COLUMN stock_bottles REAL NOT NULL DEFAULT 0');
+  db.exec(`UPDATE products SET stock_bottles = ROUND(stock_qty / 180.0, 4)
+           WHERE unit_type = 'ml' AND stock_qty > 0`);
+  db.exec(`UPDATE products SET low_stock_qty = ROUND(low_stock_qty / 180.0, 2)
+           WHERE unit_type = 'ml' AND low_stock_qty > 180`);
+}
+db.exec("UPDATE products SET bottle_size_ml = 180 WHERE unit_type = 'ml'");
+db.exec(
+  "UPDATE products SET stock_qty = ROUND(stock_bottles * 180, 2) WHERE unit_type = 'ml'",
+);
+
+/** Round a bottle count to 4 decimals so 90 ml stays exactly 0.5 of a bottle. */
+export function roundBottles(value) {
+  return Math.round((Number(value) || 0) * 10000) / 10000;
+}
+
+/** Bottle-equivalent stock, sealed bottle count and loose ml for a liquor product. */
+export function bottleStock(product) {
+  const size = Number(product.bottle_size_ml) || 180;
+  const bottles = roundBottles(product.stock_bottles);
+  const sealed = Math.floor(bottles + 1e-9);
+  const looseMl = Math.max(0, Math.round((bottles - sealed) * size));
+  return {
+    bottle_size_ml: size,
+    stock_bottles: bottles,
+    sealed_bottles: sealed,
+    loose_ml: looseMl,
+    bottles_label: `${bottles.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')} bottles`,
+  };
+}
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
