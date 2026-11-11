@@ -1,4 +1,4 @@
-import { db, getSetting, audit } from './db.js';
+import { db, getSetting, audit, roundBottles } from './db.js';
 import { HttpError, money, nowISO, localDate, today } from './util.js';
 
 const PAYMENT_MODES = ['cash', 'upi', 'card', 'split', 'credit'];
@@ -35,6 +35,8 @@ export function resolveItems(rawItems) {
       consume_qty: variant.consume_qty,
       unit_type: product.unit_type,
       stock_qty: product.stock_qty,
+      stock_bottles: product.stock_bottles,
+      bottle_size_ml: product.bottle_size_ml || 180,
     });
   }
   return lines;
@@ -98,7 +100,10 @@ function splitPayment(payload, total) {
 
 function deductStock(lines, billId, userId, createdAt) {
   const allowNegative = getSetting('allow_negative_stock', '1') === '1';
-  const update = db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?');
+  const updateBottle = db.prepare(
+    'UPDATE products SET stock_bottles = ?, stock_qty = ?, updated_at = ? WHERE id = ?',
+  );
+  const updateUnit = db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?');
   const ledger = db.prepare(
     `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
      VALUES (?, ?, ?, 'sale', 'bill', ?, ?, ?, ?)`,
@@ -106,12 +111,41 @@ function deductStock(lines, billId, userId, createdAt) {
   const warnings = [];
   for (const line of lines) {
     const product = db.prepare('SELECT * FROM products WHERE id = ?').get(line.product_id);
+
+    // Liquor is stocked in sealed 180 ml bottles: a 90 ml pour removes exactly half a bottle.
+    if (product.unit_type === 'ml') {
+      const size = Number(product.bottle_size_ml) || 180;
+      const usedBottles = roundBottles((line.consume_qty / size) * line.qty);
+      const nextBottles = roundBottles(product.stock_bottles - usedBottles);
+      if (nextBottles < 0 && !allowNegative) {
+        throw new HttpError(
+          400,
+          `Not enough stock for ${line.product_name} (${product.stock_bottles} bottles left)`,
+        );
+      }
+      updateBottle.run(nextBottles, money(nextBottles * size), createdAt, product.id);
+      ledger.run(
+        product.id,
+        -usedBottles,
+        nextBottles,
+        billId,
+        `${line.variant_label} x ${line.qty} on ${line.product_name} (-${usedBottles} bottles)`,
+        userId,
+        createdAt,
+      );
+      if (nextBottles <= 0) warnings.push(`${line.product_name} is out of stock`);
+      else if (nextBottles <= product.low_stock_qty) {
+        warnings.push(`${line.product_name} is low on stock (${nextBottles} bottles left)`);
+      }
+      continue;
+    }
+
     const used = money(line.consume_qty * line.qty);
     const next = money(product.stock_qty - used);
     if (next < 0 && !allowNegative) {
       throw new HttpError(400, `Not enough stock for ${line.product_name} (${product.stock_qty} left)`);
     }
-    update.run(next, createdAt, product.id);
+    updateUnit.run(next, createdAt, product.id);
     ledger.run(
       product.id,
       -used,
@@ -129,18 +163,41 @@ function deductStock(lines, billId, userId, createdAt) {
 
 export function restoreStock(bill, userId) {
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(bill.order_id);
-  const update = db.prepare('UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?');
+  const updateBottle = db.prepare(
+    'UPDATE products SET stock_bottles = stock_bottles + ?, stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?',
+  );
+  const updateUnit = db.prepare('UPDATE products SET stock_qty = stock_qty + ?, updated_at = ? WHERE id = ?');
   const ledger = db.prepare(
     `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
      VALUES (?, ?, ?, 'return', 'bill-void', ?, ?, ?, ?)`,
   );
   const now = nowISO();
   for (const item of items) {
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
     const variant = db.prepare('SELECT * FROM product_variants WHERE id = ?').get(item.variant_id);
+
+    // Give the exact bottle fraction back for liquor voids.
+    if (product?.unit_type === 'ml') {
+      const size = Number(product.bottle_size_ml) || 180;
+      const backBottles = roundBottles(((variant?.consume_qty ?? 0) / size) * item.qty);
+      updateBottle.run(backBottles, money(backBottles * size), now, item.product_id);
+      const after = db.prepare('SELECT stock_bottles FROM products WHERE id = ?').get(item.product_id);
+      ledger.run(
+        item.product_id,
+        backBottles,
+        after.stock_bottles,
+        bill.id,
+        `Void of ${bill.bill_no} (+${backBottles} bottles)`,
+        userId,
+        now,
+      );
+      continue;
+    }
+
     const back = money((variant?.consume_qty ?? 0) * item.qty);
-    update.run(back, now, item.product_id);
-    const product = db.prepare('SELECT stock_qty FROM products WHERE id = ?').get(item.product_id);
-    ledger.run(item.product_id, back, product.stock_qty, bill.id, `Void of ${bill.bill_no}`, userId, now);
+    updateUnit.run(back, now, item.product_id);
+    const after = db.prepare('SELECT stock_qty FROM products WHERE id = ?').get(item.product_id);
+    ledger.run(item.product_id, back, after.stock_qty, bill.id, `Void of ${bill.bill_no}`, userId, now);
   }
 }
 

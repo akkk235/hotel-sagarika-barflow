@@ -1,7 +1,8 @@
 import express from 'express';
-import { db, audit, getSettings } from '../db.js';
+import { db, audit, getSettings, bottleStock, roundBottles } from '../db.js';
 import { authenticate, manager } from '../auth.js';
 import { HttpError, money, nowISO, toNum } from '../util.js';
+import { roomList, roomSummary } from '../lodging.js';
 
 const router = express.Router();
 const POUR_SIZES = [30, 60, 90, 120, 150, 180];
@@ -23,7 +24,9 @@ export function productsWithVariants({ includeInactive = false } = {}) {
     if (!byProduct.has(v.product_id)) byProduct.set(v.product_id, []);
     byProduct.get(v.product_id).push(v);
   }
-  return products.map((p) => ({ ...p, variants: byProduct.get(p.id) || [] }));
+  return products.map((p) =>
+    p.unit_type === 'ml' ? { ...p, ...bottleStock(p), variants: byProduct.get(p.id) || [] } : { ...p, variants: byProduct.get(p.id) || [] },
+  );
 }
 
 export function tableList() {
@@ -46,6 +49,8 @@ router.get('/bootstrap', authenticate, (req, res) => {
     categories: db.prepare('SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order').all(),
     products: productsWithVariants(),
     tables: tableList(),
+    rooms: roomList(),
+    room_summary: roomSummary(),
     open_orders: db
       .prepare(`SELECT id, order_no, table_id, order_date, guests, created_at FROM orders WHERE status = 'open' ORDER BY id`)
       .all(),
@@ -119,7 +124,7 @@ router.get('/products', authenticate, (req, res) => {
 
 function standardPours(pegPrice) {
   return POUR_SIZES.map((ml, i) => ({
-    label: `${ml} ml`,
+    label: ml === 180 ? '180 ml (full bottle)' : `${ml} ml`,
     ml,
     price: money((Number(pegPrice) * ml) / 30),
     sort_order: i,
@@ -131,12 +136,14 @@ router.post('/products', authenticate, manager, (req, res) => {
   if (!body.name || !String(body.name).trim()) throw new HttpError(400, 'Product name is required');
   const unitType = body.unit_type === 'unit' ? 'unit' : 'ml';
   const now = nowISO();
+  // Liquor stock is entered as a number of sealed 180 ml bottles.
+  const bottles = unitType === 'ml' ? toNum(body.stock_bottles ?? body.stock_qty, 0) : 0;
   const create = db.transaction(() => {
     const result = db
       .prepare(
-        `INSERT INTO products (name, category_id, brand, sku, unit_type, bottle_size_ml, stock_qty,
+        `INSERT INTO products (name, category_id, brand, sku, unit_type, bottle_size_ml, stock_qty, stock_bottles,
            low_stock_qty, cost_price, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       )
       .run(
         String(body.name).trim(),
@@ -144,9 +151,10 @@ router.post('/products', authenticate, manager, (req, res) => {
         body.brand || null,
         body.sku || null,
         unitType,
-        body.bottle_size_ml ? Number(body.bottle_size_ml) : null,
-        toNum(body.stock_qty, 0),
-        toNum(body.low_stock_qty, unitType === 'ml' ? 1500 : 10),
+        unitType === 'ml' ? 180 : null,
+        unitType === 'ml' ? money(bottles * 180) : toNum(body.stock_qty, 0),
+        bottles,
+        toNum(body.low_stock_qty, unitType === 'ml' ? 2 : 10),
         toNum(body.cost_price, 0),
         now,
         now,
@@ -174,11 +182,19 @@ router.post('/products', authenticate, manager, (req, res) => {
         now,
       );
     });
-    if (toNum(body.stock_qty, 0) !== 0) {
+    if (unitType === 'ml' ? bottles !== 0 : toNum(body.stock_qty, 0) !== 0) {
+      const opening = unitType === 'ml' ? bottles : toNum(body.stock_qty, 0);
       db.prepare(
         `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at)
-         VALUES (?, ?, ?, 'opening', 'product', 'Opening stock', ?, ?)`,
-      ).run(productId, toNum(body.stock_qty, 0), toNum(body.stock_qty, 0), req.user.id, now);
+         VALUES (?, ?, ?, 'opening', 'product', ?, ?, ?)`,
+      ).run(
+        productId,
+        opening,
+        opening,
+        unitType === 'ml' ? 'Opening stock (180 ml bottles)' : 'Opening stock',
+        req.user.id,
+        now,
+      );
     }
     return productId;
   });
@@ -203,7 +219,11 @@ router.put('/products/:id', authenticate, manager, (req, res) => {
       body.brand ?? existing.brand,
       body.sku ?? existing.sku,
       body.unit_type === 'unit' || body.unit_type === 'ml' ? body.unit_type : existing.unit_type,
-      body.bottle_size_ml === undefined ? existing.bottle_size_ml : Number(body.bottle_size_ml) || null,
+      (body.unit_type === 'unit' || body.unit_type === 'ml' ? body.unit_type : existing.unit_type) === 'ml'
+        ? 180
+        : body.bottle_size_ml === undefined
+          ? existing.bottle_size_ml
+          : Number(body.bottle_size_ml) || null,
       body.low_stock_qty === undefined ? existing.low_stock_qty : toNum(body.low_stock_qty, existing.low_stock_qty),
       body.cost_price === undefined ? existing.cost_price : toNum(body.cost_price, existing.cost_price),
       body.is_active === undefined ? existing.is_active : body.is_active ? 1 : 0,
@@ -249,10 +269,33 @@ router.post('/products/:id/stock', authenticate, manager, (req, res) => {
   if (!product) throw new HttpError(404, 'Product not found');
   const body = req.body || {};
   const movement = ['purchase', 'adjustment', 'wastage', 'return'].includes(body.movement) ? body.movement : 'purchase';
-  const change = toNum(body.change_qty, 0);
+  // For liquor, change_qty is a number of 180 ml bottles (0.5 = one 90 ml pour).
+  const change = toNum(body.change_qty ?? body.change_bottles, 0);
   if (change === 0) throw new HttpError(400, 'Enter a quantity to add or remove');
   const now = nowISO();
+
+  if (product.unit_type === 'ml') {
+    const nextBottles = roundBottles(product.stock_bottles + change);
+    if (nextBottles < 0) throw new HttpError(400, 'Bottle stock cannot go below zero');
+    db.transaction(() => {
+      db.prepare('UPDATE products SET stock_bottles = ?, stock_qty = ?, updated_at = ? WHERE id = ?').run(
+        nextBottles,
+        money(nextBottles * (Number(product.bottle_size_ml) || 180)),
+        now,
+        id,
+      );
+      db.prepare(
+        `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at)
+         VALUES (?, ?, ?, ?, 'manual', ?, ?, ?)`,
+      ).run(id, change, nextBottles, movement, body.note || 'Bottle stock entry', req.user.id, now);
+    })();
+    audit(req.user, 'stock.adjust', 'product', id, { change_bottles: change, movement, balance: nextBottles });
+    const updated = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
+    return res.json({ product: { ...updated, ...bottleStock(updated) } });
+  }
+
   const next = money(product.stock_qty + change);
+  if (next < 0) throw new HttpError(400, 'Stock cannot go below zero');
   db.transaction(() => {
     db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?').run(next, now, id);
     db.prepare(
