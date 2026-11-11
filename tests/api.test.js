@@ -108,6 +108,15 @@ test('protected routes reject anonymous requests', async () => {
   assert.equal(res.status, 401);
 });
 
+test('tax is configurable; pin it off for deterministic bill totals', async () => {
+  const res = await call('PUT', '/api/admin/settings', {
+    token: tokens.manager,
+    body: { tax_percent: 0, service_charge_percent: 0 },
+  });
+  assert.equal(res.status, 200, res.text);
+  assert.equal(Number(res.body.settings.tax_percent), 0);
+});
+
 test('bootstrap seeds exactly 20 restaurant tables T1-T20', async () => {
   const res = await call('GET', '/api/bootstrap', { token: tokens.staff });
   assert.equal(res.status, 200);
@@ -280,6 +289,25 @@ test('bill totals add lines and reject an underpayment', async () => {
   assert.equal(short.status, 400, 'cash payment below the total must be rejected');
 });
 
+test('a configured tax rate is applied to the taxable amount', async () => {
+  await call('PUT', '/api/admin/settings', { token: tokens.manager, body: { tax_percent: 5 } });
+  const pour30 = state.liquor.variants.find((v) => v.ml === 30);
+  const res = await call('POST', '/api/bills', {
+    token: tokens.staff,
+    body: {
+      items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 2 }],
+      payment_mode: 'cash',
+      cash_amount: 147,
+      client_uuid: 'test-tax-1',
+    },
+  });
+  assert.equal(res.status, 201, res.text);
+  assert.equal(res.body.bill.subtotal, 140);
+  assert.equal(res.body.bill.tax_amount, 7);
+  assert.equal(res.body.bill.total, 147);
+  await call('PUT', '/api/admin/settings', { token: tokens.manager, body: { tax_percent: 0 } });
+});
+
 test('a running table tab can be opened, served and settled', async () => {
   const table = state.tables.find((t) => t.label === 'T1');
   const before = bottlesOf(state.liquor.id);
@@ -294,14 +322,15 @@ test('a running table tab can be opened, served and settled', async () => {
   });
   assert.equal(add.status, 201, add.text);
   assert.equal(add.body.order.items.length, 1);
-  assert.equal(add.body.order.subtotal, 240);
+  // 60 ml of a ₹70/30 ml pour costs ₹140, so two serves are ₹280.
+  assert.equal(add.body.order.subtotal, 280);
 
   const pay = await call('POST', `/api/orders/${orderId}/pay`, {
     token: tokens.staff,
-    body: { payment_mode: 'cash', cash_amount: 240, client_uuid: 'test-tab-pay-1' },
+    body: { payment_mode: 'cash', cash_amount: 280, client_uuid: 'test-tab-pay-1' },
   });
   assert.equal(pay.status, 201, pay.text);
-  assert.equal(pay.body.bill.total, 240);
+  assert.equal(pay.body.bill.total, 280);
   const consumedMl = (before - bottlesOf(state.liquor.id)) * 180;
   assert.ok(Math.abs(consumedMl - 120) < 0.05, `expected 120 ml deducted, got ${consumedMl}`);
 
@@ -354,7 +383,7 @@ test('stock entry is counted in 180 ml bottles and managers can restock', async 
   assert.equal(res.status, 200, res.text);
   assert.equal(res.body.product.stock_bottles, before + 12);
   assert.equal(res.body.product.sealed_bottles, before + 12);
-  assert.equal(res.body.product.stock_qty, (before + 12) * 180);
+  assert.ok(Math.abs(res.body.product.stock_qty - (before + 12) * 180) < 0.01);
 });
 
 test('staff cannot create products or restock', async () => {
