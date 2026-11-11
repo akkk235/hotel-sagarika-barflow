@@ -60,6 +60,8 @@ function stockOf(productId) {
 const tokens = {};
 let liquor = null;
 let pour30 = null;
+let pour60 = null;
+let pour90 = null;
 let pour180 = null;
 
 test('health endpoint responds', async () => {
@@ -112,7 +114,10 @@ test('bootstrap returns 20 tables, categories and pour sizes 30-180ml', async ()
     assert.ok(labels.includes(`${ml} ml`), `missing ${ml} ml pour on ${liquor.name}: ${labels.join(',')}`);
   }
   pour30 = liquor.variants.find((v) => v.ml === 30);
+  pour60 = liquor.variants.find((v) => v.ml === 60);
+  pour90 = liquor.variants.find((v) => v.ml === 90);
   pour180 = liquor.variants.find((v) => v.ml === 180);
+  assert.ok(pour30 && pour60 && pour90 && pour180, 'expected all pour sizes to be seeded');
   assert.ok(pour30.price > 0 && pour180.price > pour30.price, 'pour prices must increase with size');
 });
 
