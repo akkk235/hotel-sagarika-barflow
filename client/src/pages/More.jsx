@@ -6,6 +6,9 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
   const isManager = ['owner', 'manager'].includes(user?.role);
   const isOwner = user?.role === 'owner';
   const [form, setForm] = useState(settings);
+  const [pin, setPin] = useState('');
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinSet, setPinSet] = useState(false);
   const [users, setUsers] = useState([]);
   const [audit, setAudit] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
@@ -41,6 +44,37 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
   useEffect(() => {
     loadAdmin();
   }, [loadAdmin]);
+
+  useEffect(() => {
+    if (!isOwner) return undefined;
+    let alive = true;
+    api('/admin/pin')
+      .then((res) => {
+        if (alive) setPinSet(Boolean(res.pin_set));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [isOwner]);
+
+  async function savePin() {
+    if (!/^\d{4,8}$/.test(pin.trim())) {
+      notify('PIN must be 4 to 8 digits', 'error');
+      return;
+    }
+    setPinBusy(true);
+    try {
+      await api('/admin/pin', { method: 'PUT', body: { pin: pin.trim() } });
+      setPinSet(true);
+      setPin('');
+      notify('Owner PIN saved', 'ok');
+    } catch (err) {
+      notify(err.message, 'error');
+    } finally {
+      setPinBusy(false);
+    }
+  }
 
   async function saveSettings() {
     setBusy(true);
@@ -147,6 +181,7 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
       <div className="chips">
         {[
           ['settings', 'Hotel settings'],
+          ['security', 'Security'],
           ...(isManager ? [['team', 'Team']] : []),
           ...(isManager ? [['suppliers', 'Suppliers']] : []),
           ...(isManager ? [['audit', 'Audit log']] : []),
@@ -164,20 +199,47 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
           {field('address', 'Address')}
           <div className="grid-2">
             {field('phone', 'Phone')}
-            {field('gstin', 'GSTIN')}
-          </div>
-          <div className="grid-2">
             {field('upi_id', 'UPI ID')}
-            {field('tax_percent', 'GST %', 'number')}
           </div>
           <div className="grid-2">
-            {field('service_charge_percent', 'Service charge %', 'number')}
             {field('low_stock_alert', 'Low stock alert')}
+            {field('currency', 'Currency symbol')}
           </div>
           {field('invoice_footer', 'Receipt footer')}
           <button className="btn btn-primary btn-block" type="button" onClick={saveSettings} disabled={busy || !isManager || !online}>
             {isManager ? 'Save settings' : 'Only managers can edit settings'}
           </button>
+        </div>
+      ) : null}
+
+      {panel === 'security' ? (
+        <div className="card">
+          <strong className="small">Owner PIN</strong>
+          <p className="tiny muted">
+            The Owner PIN authorises bill deletion. Only the Owner account can set or change it.
+          </p>
+          {isOwner ? (
+            <>
+              <div className="field">
+                <label htmlFor="ownerpin">New PIN (4–8 digits)</label>
+                <input
+                  id="ownerpin"
+                  className="input"
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  value={pin}
+                  onChange={(e) => setPin(e.target.value)}
+                  placeholder={pinSet ? 'PIN is set' : 'Not set yet'}
+                />
+              </div>
+              <button className="btn btn-primary btn-block" type="button" onClick={savePin} disabled={pinBusy || !online}>
+                {pinBusy ? 'Saving…' : pinSet ? 'Change PIN' : 'Set PIN'}
+              </button>
+            </>
+          ) : (
+            <p className="small muted">Only the Owner can change the PIN.</p>
+          )}
         </div>
       ) : null}
 

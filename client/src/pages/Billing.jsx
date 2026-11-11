@@ -18,7 +18,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
   const products = data?.products || [];
   const categories = data?.categories || [];
   const tables = data?.tables || [];
-  const taxPercent = Number(settings?.tax_percent ?? 5);
 
   const [categoryId, setCategoryId] = useState('all');
   const [search, setSearch] = useState('');
@@ -27,7 +26,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
   const [tableId, setTableId] = useState('');
   const [sheet, setSheet] = useState(null); // 'cart' | 'receipt'
   const [mode, setMode] = useState('cash');
-  const [discount, setDiscount] = useState('');
   const [cashReceived, setCashReceived] = useState('');
   const [upiRef, setUpiRef] = useState('');
   const [customerName, setCustomerName] = useState('');
@@ -57,11 +55,9 @@ export default function Billing({ data, settings, user, online, notify, refresh,
       }))
     : cart;
 
+  // No GST, tax, service charge or discount: the guest pays the exact selling price.
   const subtotal = r2(lines.reduce((s, l) => s + l.unit_price * l.qty, 0));
-  const disc = Math.min(r2(Number(discount) || 0), subtotal);
-  const taxable = r2(subtotal - disc);
-  const taxAmount = r2((taxable * taxPercent) / 100);
-  const total = Math.round(r2(taxable + taxAmount));
+  const total = subtotal;
   const itemCount = lines.reduce((s, l) => s + l.qty, 0);
   const change = mode === 'cash' ? r2((Number(cashReceived) || 0) - total) : 0;
 
@@ -157,7 +153,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
       table_label: tableId ? tables.find((t) => String(t.id) === String(tableId))?.label : 'Counter',
       items: cart.map((l) => ({ product_id: l.product_id, variant_id: l.variant_id, qty: l.qty })),
       payment_mode: mode,
-      discount: disc,
       cash_received: mode === 'cash' ? Number(cashReceived) || total : total,
       upi_ref: mode === 'upi' ? upiRef || null : null,
       customer_name: customerName || null,
@@ -172,9 +167,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
       bill_no: billNo,
       total,
       subtotal,
-      discount: disc,
-      tax_amount: taxAmount,
-      tax_percent: taxPercent,
       payment_mode: mode,
       cash_received: payload.cash_received,
       change_returned: change > 0 ? change : 0,
@@ -198,7 +190,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
           method: 'POST',
           body: {
             payment_mode: mode,
-            discount: disc,
             cash_received: mode === 'cash' ? Number(cashReceived) || total : total,
             upi_ref: mode === 'upi' ? upiRef : null,
             customer_name: customerName || null,
@@ -334,7 +325,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
             <div className="amount">{money(total)}</div>
             <div className="tiny muted">
               {itemCount} item{itemCount === 1 ? '' : 's'}
-              {disc > 0 ? ` · ₹${disc} off` : ''}
             </div>
           </div>
           <div className="spacer" />
@@ -489,50 +479,15 @@ export default function Billing({ data, settings, user, online, notify, refresh,
                     ))}
                   </select>
                 </div>
-                <div className="field">
-                  <label htmlFor="discount">Discount ₹</label>
-                  <input
-                    id="discount"
-                    className="input"
-                    type="number"
-                    min="0"
-                    inputMode="decimal"
-                    value={discount}
-                    onChange={(e) => setDiscount(e.target.value)}
-                    placeholder="0"
-                  />
-                </div>
               </div>
             ) : (
-              <div className="field" style={{ marginTop: 12 }}>
-                <label htmlFor="discount2">Discount ₹</label>
-                <input
-                  id="discount2"
-                  className="input"
-                  type="number"
-                  min="0"
-                  inputMode="decimal"
-                  value={discount}
-                  onChange={(e) => setDiscount(e.target.value)}
-                  placeholder="0"
-                />
-              </div>
+              null
             )}
 
             <div className="totals">
               <div className="row">
                 <span className="muted">Subtotal</span>
                 <span>{money(subtotal)}</span>
-              </div>
-              {disc > 0 ? (
-                <div className="row">
-                  <span className="muted">Discount</span>
-                  <span>−{money(disc)}</span>
-                </div>
-              ) : null}
-              <div className="row">
-                <span className="muted">GST {taxPercent}%</span>
-                <span>{money(taxAmount)}</span>
               </div>
               <div className="row grand">
                 <span>Total</span>
@@ -648,7 +603,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
             <div className="receipt">
               <h3>{settings.hotel_name || 'HOTEL SAGARIKA'}</h3>
               {settings.address ? <div style={{ textAlign: 'center' }}>{settings.address}</div> : null}
-              {settings.gstin ? <div style={{ textAlign: 'center' }}>GSTIN {settings.gstin}</div> : null}
               <div className="sep" />
               <div className="r-row">
                 <span>{receipt.bill_no}</span>
@@ -671,16 +625,6 @@ export default function Billing({ data, settings, user, online, notify, refresh,
               <div className="r-row">
                 <span>Subtotal</span>
                 <span>{money(receipt.subtotal)}</span>
-              </div>
-              {Number(receipt.discount) > 0 ? (
-                <div className="r-row">
-                  <span>Discount</span>
-                  <span>−{money(receipt.discount)}</span>
-                </div>
-              ) : null}
-              <div className="r-row">
-                <span>GST {receipt.tax_percent}%</span>
-                <span>{money(receipt.tax_amount)}</span>
               </div>
               <div className="r-row r-total">
                 <span>TOTAL</span>
