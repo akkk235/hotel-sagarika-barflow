@@ -77,7 +77,7 @@ function splitPayment(payload, total) {
     return { mode, cash, upi, card };
   }
   if (mode === 'cash') {
-    const received = tendered(payload.cash_received);
+    const received = tendered(payload.cash_received ?? payload.cash_amount);
     if (received !== null && received < total - 0.05) {
       throw new HttpError(400, `Cash received (${received}) is less than the bill total (${total})`);
     }
@@ -223,7 +223,7 @@ export const createBill = db.transaction(({ user, payload, deviceId = null, offl
 
   const billCount = db.prepare('SELECT COUNT(*) AS c FROM bills WHERE bill_date = ?').get(billDate).c;
   const billNo = `BILL-${billDate.replaceAll('-', '')}-${String(billCount + 1).padStart(4, '0')}`;
-  const cashReceived = money(payload.cash_received ?? (split.cash || totals.total));
+  const cashReceived = money(payload.cash_received ?? payload.cash_amount ?? (split.cash || totals.total));
   const changeReturned = split.mode === 'cash' ? money(Math.max(0, cashReceived - totals.total)) : 0;
 
   const billRes = db
