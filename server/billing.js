@@ -65,6 +65,7 @@ export function computeTotals({ lines, discount = 0, taxPercent, servicePercent 
 function splitPayment(payload, total) {
   const mode = String(payload.payment_mode || 'cash').toLowerCase();
   if (!PAYMENT_MODES.includes(mode)) throw new HttpError(400, 'Payment mode must be cash, upi, card or split');
+  const tendered = (value) => (value === undefined || value === null || value === '' ? null : money(value));
   if (mode === 'split') {
     const cash = money(payload.cash_amount || 0);
     const upi = money(payload.upi_amount || 0);
@@ -74,6 +75,18 @@ function splitPayment(payload, total) {
       throw new HttpError(400, `Split payment parts (${sum}) must equal the bill total (${total})`);
     }
     return { mode, cash, upi, card };
+  }
+  if (mode === 'cash') {
+    const received = tendered(payload.cash_received);
+    if (received !== null && received < total - 0.05) {
+      throw new HttpError(400, `Cash received (${received}) is less than the bill total (${total})`);
+    }
+  }
+  if (mode === 'upi') {
+    const upiPaid = tendered(payload.upi_amount);
+    if (upiPaid !== null && upiPaid < total - 0.05) {
+      throw new HttpError(400, `UPI amount (${upiPaid}) is less than the bill total (${total})`);
+    }
   }
   return {
     mode,
