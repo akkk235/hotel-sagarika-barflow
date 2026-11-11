@@ -2,7 +2,7 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { seedIfEmpty } from './seed.js';
+import { seedIfEmpty, ensureDiningTables, ensureRooms } from './seed.js';
 import { HttpError } from './util.js';
 import authRoutes from './routes/auth.js';
 import catalogRoutes from './routes/catalog.js';
@@ -12,11 +12,16 @@ import billRoutes from './routes/bills.js';
 import reportRoutes from './routes/reports.js';
 import syncRoutes from './routes/sync.js';
 import adminRoutes from './routes/admin.js';
+import lodgingRoutes from './routes/lodging.js';
+import dashboardRoutes from './routes/dashboard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
 
 seedIfEmpty();
+// Guarantee the corrected inventory/table/room setup on every boot.
+ensureDiningTables();
+ensureRooms();
 
 export function createApp() {
   const app = express();
@@ -36,6 +41,8 @@ export function createApp() {
   app.use('/api/auth', authRoutes);
   app.use('/api', catalogRoutes);
   app.use('/api/tables', tableRoutes);
+  app.use('/api/rooms', lodgingRoutes);
+  app.use('/api/dashboard', dashboardRoutes);
   app.use('/api/orders', orderRoutes);
   app.use('/api/bills', billRoutes);
   app.use('/api/reports', reportRoutes);

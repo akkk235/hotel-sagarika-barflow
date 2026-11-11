@@ -1,6 +1,6 @@
 import express from 'express';
 import { db, audit } from '../db.js';
-import { authenticate } from '../auth.js';
+import { authenticate, manager } from '../auth.js';
 import { HttpError, money, nowISO, toInt } from '../util.js';
 import { tableList } from './catalog.js';
 
@@ -16,6 +16,33 @@ router.get('/', authenticate, (req, res) => {
     cleaning: tables.filter((t) => t.status === 'cleaning').length,
   };
   res.json({ tables, summary });
+});
+
+/** Rename a table or move it to another zone (Owner / Manager only). */
+router.patch('/:id', authenticate, manager, (req, res) => {
+  const id = Number(req.params.id);
+  const table = db.prepare('SELECT * FROM dining_tables WHERE id = ?').get(id);
+  if (!table) throw new HttpError(404, 'Table not found');
+  const body = req.body || {};
+  const label = body.label === undefined ? table.label : String(body.label).trim();
+  if (!label) throw new HttpError(400, 'Table name is required');
+  if (label.length > 24) throw new HttpError(400, 'Table name must be 24 characters or fewer');
+  if (label !== table.label) {
+    const clash = db.prepare('SELECT id FROM dining_tables WHERE label = ? AND id <> ?').get(label, id);
+    if (clash) throw new HttpError(409, `Table name ${label} is already in use`);
+  }
+  const zone = body.zone === undefined ? table.zone : String(body.zone).trim() || table.zone;
+  const capacity =
+    body.capacity === undefined ? table.capacity : Math.max(1, toInt(body.capacity, table.capacity));
+  db.prepare('UPDATE dining_tables SET label = ?, zone = ?, capacity = ?, updated_at = ? WHERE id = ?').run(
+    label,
+    zone,
+    capacity,
+    nowISO(),
+    id,
+  );
+  audit(req.user, 'table.update', 'table', id, { label, zone, capacity });
+  res.json({ table: db.prepare('SELECT * FROM dining_tables WHERE id = ?').get(id) });
 });
 
 router.post('/:id/status', authenticate, (req, res) => {
