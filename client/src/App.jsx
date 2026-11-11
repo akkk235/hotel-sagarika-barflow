@@ -11,6 +11,8 @@ import {
   saveCache,
 } from './api.js';
 import Login from './pages/Login.jsx';
+import Dashboard from './pages/Dashboard.jsx';
+import Lodging from './pages/Lodging.jsx';
 import Billing from './pages/Billing.jsx';
 import Tables from './pages/Tables.jsx';
 import Products from './pages/Products.jsx';
@@ -18,17 +20,18 @@ import Reports from './pages/Reports.jsx';
 import More from './pages/More.jsx';
 
 const TABS = [
+  { id: 'home', label: 'Home', icon: '🏠' },
   { id: 'billing', label: 'Billing', icon: '🧾' },
   { id: 'tables', label: 'Tables', icon: '🪑' },
+  { id: 'rooms', label: 'Rooms', icon: '🛏️' },
   { id: 'products', label: 'Stock', icon: '🍾' },
-  { id: 'reports', label: 'Reports', icon: '📊' },
   { id: 'more', label: 'More', icon: '⚙️' },
 ];
 
 export default function App() {
   const [user, setUser] = useState(getUser());
   const [data, setData] = useState(() => loadCache());
-  const [tab, setTab] = useState('billing');
+  const [tab, setTab] = useState('home');
   const [online, setOnline] = useState(navigator.onLine);
   const [queueCount, setQueueCount] = useState(getQueue().length);
   const [toast, setToast] = useState(null);
@@ -161,6 +164,15 @@ export default function App() {
       </header>
 
       <main className="content">
+        {tab === 'home' ? (
+          <Dashboard
+            user={user}
+            online={online}
+            notify={notify}
+            refresh={refresh}
+            go={(id) => setTab(id)}
+          />
+        ) : null}
         {tab === 'billing' ? (
           <Billing
             data={data}
@@ -177,6 +189,7 @@ export default function App() {
         {tab === 'tables' ? (
           <Tables
             data={data}
+            user={user}
             online={online}
             notify={notify}
             refresh={refresh}
@@ -186,6 +199,9 @@ export default function App() {
             }}
             goToBilling={() => setTab('billing')}
           />
+        ) : null}
+        {tab === 'rooms' ? (
+          <Lodging user={user} online={online} notify={notify} refresh={refresh} />
         ) : null}
         {tab === 'products' ? (
           <Products data={data} user={user} notify={notify} refresh={refresh} online={online} />
