@@ -4,10 +4,12 @@ import { api } from '../api.js';
 const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const STATUSES = ['free', 'occupied', 'reserved', 'cleaning'];
 
-export default function Tables({ data, online, notify, refresh, onOpenTab }) {
+export default function Tables({ data, user, online, notify, refresh, onOpenTab }) {
   const tables = data?.tables || [];
   const [zone, setZone] = useState('all');
   const [busy, setBusy] = useState(false);
+  const [edit, setEdit] = useState(null);
+  const canEdit = ['owner', 'manager'].includes(user?.role);
   const zones = ['all', ...Array.from(new Set(tables.map((t) => t.zone).filter(Boolean)))];
   const shown = tables.filter((t) => zone === 'all' || t.zone === zone);
   const counts = {
@@ -60,10 +62,31 @@ export default function Tables({ data, online, notify, refresh, onOpenTab }) {
     }
   }
 
+  async function saveTable() {
+    if (!edit.label.trim()) {
+      notify('Table name is required', 'error');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/tables/${edit.id}`, {
+        method: 'PATCH',
+        body: { label: edit.label, zone: edit.zone, capacity: Number(edit.capacity) || 1 },
+      });
+      notify(`Table updated to ${edit.label}`, 'ok');
+      setEdit(null);
+      refresh();
+    } catch (err) {
+      notify(err.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div>
       <div className="row between" style={{ marginBottom: 10 }}>
-        <h2 style={{ margin: 0, fontSize: 19 }}>Dining tables</h2>
+        <h2 style={{ margin: 0, fontSize: 19 }}>Restaurant tables</h2>
         <span className="tiny muted">{tables.length} tables</span>
       </div>
 
@@ -138,10 +161,68 @@ export default function Tables({ data, online, notify, refresh, onOpenTab }) {
                   </option>
                 ))}
               </select>
+              {canEdit ? (
+                <button
+                  className="btn btn-sm"
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    setEdit({ id: t.id, label: t.label, zone: t.zone || '', capacity: t.capacity || 2 })
+                  }
+                >
+                  Rename
+                </button>
+              ) : null}
             </div>
           </div>
         ))}
       </div>
+
+      {edit ? (
+        <div className="sheet-backdrop" onClick={() => setEdit(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-head">
+              <h3>Edit table</h3>
+              <button className="btn btn-sm" type="button" onClick={() => setEdit(null)}>
+                ✕
+              </button>
+            </div>
+            <div className="field">
+              <label htmlFor="tlabel">Table name</label>
+              <input
+                id="tlabel"
+                className="input"
+                value={edit.label}
+                onChange={(e) => setEdit({ ...edit, label: e.target.value })}
+                placeholder="e.g. T1"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="tzone">Zone</label>
+              <input
+                id="tzone"
+                className="input"
+                value={edit.zone}
+                onChange={(e) => setEdit({ ...edit, zone: e.target.value })}
+                placeholder="e.g. Ground floor / Garden"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="tcap">Seats</label>
+              <input
+                id="tcap"
+                className="input"
+                type="number"
+                value={edit.capacity}
+                onChange={(e) => setEdit({ ...edit, capacity: e.target.value })}
+              />
+            </div>
+            <button className="btn btn-primary btn-block" type="button" onClick={saveTable} disabled={busy}>
+              {busy ? 'Saving…' : 'Save table'}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
