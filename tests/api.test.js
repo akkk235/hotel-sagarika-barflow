@@ -13,27 +13,22 @@ const { createApp } = await import('../server/app.js');
 const { db } = await import('../server/db.js');
 
 const app = createApp();
+// Bind on 0.0.0.0 like the production server; requests use localhost.
 const server = app.listen(0, '0.0.0.0');
 await new Promise((resolve) => server.once('listening', resolve));
-const base = `http://127.0.0.1:${server.address().port}`;
+const base = `http://localhost:${server.address().port}`;
 
 test.after(() => {
   server.close();
-  try {
-    db.close();
-  } catch {
-    /* already closed */
-  }
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-async function call(method, url, { token, body, headers } = {}) {
-  const res = await fetch(base + url, {
+async function call(method, urlPath, { token, body } = {}) {
+  const res = await fetch(base + urlPath, {
     method,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(headers || {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -42,27 +37,19 @@ async function call(method, url, { token, body, headers } = {}) {
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
-    json = { raw: text };
+    json = null;
   }
-  return { status: res.status, body: json };
+  return { status: res.status, body: json, text };
 }
 
-async function login(username, password) {
-  const res = await call('POST', '/api/auth/login', { body: { username, password } });
-  assert.equal(res.status, 200, `login ${username} failed: ${JSON.stringify(res.body)}`);
-  return res.body.token;
-}
-
-function stockOf(productId) {
-  return db.prepare('SELECT stock_qty FROM products WHERE id = ?').get(productId).stock_qty;
+/** Sealed 180 ml bottle balance for a product. */
+function bottlesOf(productId) {
+  const row = db.prepare('SELECT stock_bottles FROM products WHERE id = ?').get(productId);
+  return row ? row.stock_bottles : null;
 }
 
 const tokens = {};
-let liquor = null;
-let pour30 = null;
-let pour60 = null;
-let pour90 = null;
-let pour180 = null;
+const state = {};
 
 test('health endpoint responds', async () => {
   const res = await call('GET', '/api/health');
@@ -70,315 +57,548 @@ test('health endpoint responds', async () => {
   assert.equal(res.body.ok, true);
 });
 
-test('schema has all 20 tables', () => {
-  const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    .all()
-    .map((r) => r.name);
-  const expected = [
-    'users', 'sessions', 'categories', 'products', 'product_variants', 'suppliers',
-    'purchases', 'purchase_items', 'stock_ledger', 'dining_tables', 'table_sessions',
-    'orders', 'order_items', 'bills', 'payments', 'customers', 'expenses', 'sync_log',
-    'settings', 'audit_logs',
-  ];
-  for (const name of expected) assert.ok(tables.includes(name), `missing table ${name}`);
-  assert.equal(tables.length, 20, `expected 20 tables, found ${tables.length}: ${tables.join(',')}`);
+test('schema contains restaurant, lodging and inventory tables', () => {
+  const names = new Set(
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name),
+  );
+  for (const required of [
+    'users',
+    'categories',
+    'products',
+    'product_variants',
+    'dining_tables',
+    'orders',
+    'order_items',
+    'bills',
+    'payments',
+    'stock_ledger',
+    'settings',
+    'audit_logs',
+    'expenses',
+    'suppliers',
+    'sync_log',
+    'rooms',
+    'room_stays',
+  ]) {
+    assert.ok(names.has(required), `expected table ${required} to exist`);
+  }
 });
 
-test('owner, manager and staff can log in with distinct roles', async () => {
-  tokens.owner = await login('owner', 'owner123');
-  tokens.manager = await login('manager', 'manager123');
-  tokens.staff = await login('staff', 'staff123');
-  const me = await call('GET', '/api/auth/me', { token: tokens.staff });
-  assert.equal(me.body.user.role, 'staff');
-  const bad = await call('POST', '/api/auth/login', { body: { username: 'staff', password: 'wrong' } });
-  assert.equal(bad.status, 401);
+test('owner, manager and staff can log in', async () => {
+  for (const [role, username, password] of [
+    ['owner', 'owner', 'owner123'],
+    ['manager', 'manager', 'manager123'],
+    ['staff', 'staff', 'staff123'],
+  ]) {
+    const res = await call('POST', '/api/auth/login', { body: { username, password } });
+    assert.equal(res.status, 200, `${role} login failed: ${res.text}`);
+    assert.ok(res.body.token, `${role} token missing`);
+    assert.equal(res.body.user.role, role);
+    tokens[role] = res.body.token;
+  }
 });
 
-test('API rejects unauthenticated requests', async () => {
-  const res = await call('GET', '/api/bootstrap');
+test('a wrong password is rejected', async () => {
+  const res = await call('POST', '/api/auth/login', { body: { username: 'owner', password: 'nope' } });
   assert.equal(res.status, 401);
 });
 
-test('bootstrap returns 20 tables, categories and pour sizes 30-180ml', async () => {
-  const res = await call('GET', '/api/bootstrap', { token: tokens.staff });
-  assert.equal(res.status, 200);
-  assert.equal(res.body.tables.length, 20, 'expected 20 dining tables');
-  assert.ok(res.body.categories.length >= 5, 'expected seeded categories');
-  assert.ok(res.body.products.length >= 10, 'expected seeded products');
-
-  liquor = res.body.products.find((p) => p.unit_type === 'ml' && p.variants.length >= 6);
-  assert.ok(liquor, 'expected a liquor product with pour sizes');
-  const labels = liquor.variants.map((v) => v.label);
-  for (const ml of [30, 60, 90, 120, 150, 180]) {
-    assert.ok(labels.includes(`${ml} ml`), `missing ${ml} ml pour on ${liquor.name}: ${labels.join(',')}`);
-  }
-  pour30 = liquor.variants.find((v) => v.ml === 30);
-  pour60 = liquor.variants.find((v) => v.ml === 60);
-  pour90 = liquor.variants.find((v) => v.ml === 90);
-  pour180 = liquor.variants.find((v) => v.ml === 180);
-  assert.ok(pour30 && pour60 && pour90 && pour180, 'expected all pour sizes to be seeded');
-  assert.ok(pour30.price > 0 && pour180.price > pour30.price, 'pour prices must increase with size');
+test('protected routes reject anonymous requests', async () => {
+  const res = await call('GET', '/api/products');
+  assert.equal(res.status, 401);
 });
 
-test('cash bill deducts stock automatically', async () => {
-  const before = stockOf(liquor.id);
+test('bootstrap seeds exactly 20 restaurant tables T1-T20', async () => {
+  const res = await call('GET', '/api/bootstrap', { token: tokens.staff });
+  assert.equal(res.status, 200);
+  const tables = res.body.tables;
+  assert.equal(tables.length, 20, 'expected exactly 20 restaurant tables');
+  const labels = tables.map((t) => t.label).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+  assert.deepEqual(labels, Array.from({ length: 20 }, (_, i) => `T${i + 1}`));
+  // Lodging rooms must never appear in the restaurant table list.
+  assert.ok(!tables.some((t) => ['101', '102', '109'].includes(t.label)));
+  state.tables = tables;
+});
+
+test('bootstrap seeds exactly 9 lodging rooms 101-109', async () => {
+  const res = await call('GET', '/api/rooms', { token: tokens.staff });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.rooms.length, 9, 'expected exactly 9 rooms');
+  assert.deepEqual(
+    res.body.rooms.map((r) => r.room_no),
+    ['101', '102', '103', '104', '105', '106', '107', '108', '109'],
+  );
+  assert.equal(res.body.summary.total, 9);
+  assert.equal(res.body.summary.available, 9);
+  state.rooms = res.body.rooms;
+});
+
+test('liquor is stocked in sealed 180 ml bottles with six serve sizes', async () => {
+  const res = await call('GET', '/api/bootstrap', { token: tokens.staff });
+  const liquor = res.body.products.find((p) => p.unit_type === 'ml' && p.name === 'Blenders Pride Reserve');
+  assert.ok(liquor, 'expected a seeded liquor product');
+  state.liquor = liquor;
+
+  assert.equal(liquor.bottle_size_ml, 180);
+  assert.equal(liquor.stock_bottles, 10, 'seeded stock must be counted in bottles');
+  assert.equal(liquor.sealed_bottles, 10);
+  assert.equal(liquor.loose_ml, 0);
+
+  assert.deepEqual(
+    liquor.variants.map((v) => v.ml),
+    [30, 60, 90, 120, 150, 180],
+    'serve sizes must be 30/60/90/120/150 plus the full 180 ml bottle',
+  );
+  assert.equal(liquor.variants.find((v) => v.ml === 180).label, '180 ml (full bottle)');
+  // Every serve size keeps its own editable price, scaling up with volume.
+  const prices = liquor.variants.map((v) => v.price);
+  assert.ok(prices.every((p) => p > 0));
+  assert.ok(prices[5] > prices[0]);
+  assert.equal(liquor.variants[0].price, 70);
+  assert.equal(liquor.variants[2].price, 210);
+
+  const beer = res.body.products.find((p) => p.unit_type === 'unit' && /Kingfisher/.test(p.name));
+  assert.ok(beer, 'expected a unit product');
+  state.beer = beer;
+});
+
+test('cash bill deducts the correct bottle fraction (2 x 30 ml = 60 ml)', async () => {
+  const before = bottlesOf(state.liquor.id);
+  const pour30 = state.liquor.variants.find((v) => v.ml === 30);
   const res = await call('POST', '/api/bills', {
     token: tokens.staff,
     body: {
-      items: [{ product_id: liquor.id, variant_id: pour30.id, qty: 2 }],
+      items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 2 }],
       payment_mode: 'cash',
       cash_amount: 1000,
       client_uuid: 'test-cash-1',
     },
   });
-  assert.equal(res.status, 201, JSON.stringify(res.body));
-  const bill = res.body.bill;
-  assert.equal(bill.payment_mode, 'cash');
-  assert.equal(bill.status, 'paid');
-  assert.equal(bill.items.length, 1);
-  assert.equal(bill.items[0].qty, 2);
-  assert.ok(bill.total > 0);
-  assert.equal(res.body.duplicate, false);
-
-  const after = stockOf(liquor.id);
-  assert.equal(before - after, 60, 'two 30ml pours should deduct 60ml');
-
-  const ledger = db
-    .prepare("SELECT * FROM stock_ledger WHERE product_id = ? AND movement = 'sale' ORDER BY id DESC LIMIT 1")
-    .get(liquor.id);
-  assert.ok(ledger, 'stock ledger should record the sale');
-  assert.equal(ledger.change_qty, -60);
+  assert.equal(res.status, 201, res.text);
+  assert.equal(res.body.bill.status, 'paid');
+  assert.equal(res.body.bill.total, 140);
+  const after = bottlesOf(state.liquor.id);
+  const consumedMl = (before - after) * 180;
+  assert.ok(Math.abs(consumedMl - 60) < 0.05, `expected 60 ml deducted, got ${consumedMl}`);
+  state.cashBill = res.body.bill;
 });
 
-test('replaying the same offline bill is idempotent (no double stock deduction)', async () => {
-  const before = stockOf(liquor.id);
-  const payload = {
-    items: [{ product_id: liquor.id, variant_id: pour30.id, qty: 2 }],
-    payment_mode: 'cash',
-    cash_amount: 1000,
-    client_uuid: 'test-cash-1',
-  };
-  const res = await call('POST', '/api/bills', { token: tokens.staff, body: payload });
-  assert.equal(res.status, 200);
-  assert.equal(res.body.duplicate, true);
-  assert.equal(stockOf(liquor.id), before, 'duplicate replay must not deduct stock again');
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM bills WHERE client_uuid = ?').get('test-cash-1').c, 1);
-});
-
-test('UPI bill records payment mode and deducts 180ml', async () => {
-  const before = stockOf(liquor.id);
+test('replaying the same client_uuid does not deduct stock twice', async () => {
+  const before = bottlesOf(state.liquor.id);
+  const pour30 = state.liquor.variants.find((v) => v.ml === 30);
   const res = await call('POST', '/api/bills', {
     token: tokens.staff,
     body: {
-      items: [{ product_id: liquor.id, variant_id: pour180.id, qty: 1 }],
-      payment_mode: 'upi',
-      upi_amount: pour180.price * 1.05 + 1,
-      upi_ref: 'UPI-TEST-REF',
-      client_uuid: 'test-upi-1',
+      items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 2 }],
+      payment_mode: 'cash',
+      cash_amount: 1000,
+      client_uuid: 'test-cash-1',
     },
   });
-  assert.equal(res.status, 201, JSON.stringify(res.body));
-  assert.equal(res.body.bill.payment_mode, 'upi');
-  assert.ok(res.body.bill.upi_amount > 0);
-  assert.equal(before - stockOf(liquor.id), 180, 'one 180ml pour should deduct 180ml');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.duplicate, true);
+  assert.equal(res.body.bill.id, state.cashBill.id);
+  assert.equal(bottlesOf(state.liquor.id), before);
 });
 
-test('bill total equals subtotal + tax - discount', async () => {
+test('a full 180 ml serve deducts exactly one sealed bottle', async () => {
+  const before = bottlesOf(state.liquor.id);
+  const pour180 = state.liquor.variants.find((v) => v.ml === 180);
   const res = await call('POST', '/api/bills', {
     token: tokens.staff,
     body: {
-      items: [{ product_id: liquor.id, variant_id: pour30.id, qty: 4 }],
+      items: [{ product_id: state.liquor.id, variant_id: pour180.id, qty: 1 }],
+      payment_mode: 'upi',
+      upi_amount: 420,
+      client_uuid: 'test-full-bottle-1',
+    },
+  });
+  assert.equal(res.status, 201, res.text);
+  assert.equal(res.body.bill.total, 420);
+  const after = bottlesOf(state.liquor.id);
+  assert.ok(Math.abs(before - after - 1) < 0.0001, `expected one bottle deducted, got ${before - after}`);
+});
+
+test('a 90 ml serve leaves 9.5 bottles from 10', async () => {
+  const created = await call('POST', '/api/products', {
+    token: tokens.manager,
+    body: { name: 'Test 90 ml Bottle', category_id: state.liquor.category_id, unit_type: 'ml', stock_bottles: 10, peg_price: 90, cost_price: 300 },
+  });
+  assert.equal(created.status, 201, created.text);
+  const product = created.body.product;
+  assert.equal(product.stock_bottles, 10);
+  assert.equal(product.variants.length, 6);
+
+  const pour90 = product.variants.find((v) => v.ml === 90);
+  const res = await call('POST', '/api/bills', {
+    token: tokens.staff,
+    body: {
+      items: [{ product_id: product.id, variant_id: pour90.id, qty: 1 }],
       payment_mode: 'cash',
-      discount: 10,
+      cash_amount: 270,
+      client_uuid: 'test-90ml-bottle',
+    },
+  });
+  assert.equal(res.status, 201, res.text);
+  assert.equal(res.body.bill.total, 270);
+  assert.equal(bottlesOf(product.id), 9.5, '10 bottles minus one 90 ml serve must leave 9.5 bottles');
+});
+
+test('bill totals add lines and reject an underpayment', async () => {
+  const pour30 = state.liquor.variants.find((v) => v.ml === 30);
+  const beerVariant = state.beer.variants[0];
+  const res = await call('POST', '/api/bills', {
+    token: tokens.staff,
+    body: {
+      items: [
+        { product_id: state.liquor.id, variant_id: pour30.id, qty: 2 },
+        { product_id: state.beer.id, variant_id: beerVariant.id, qty: 1 },
+      ],
+      payment_mode: 'cash',
+      cash_amount: 1000,
       client_uuid: 'test-math-1',
     },
   });
-  const b = res.body.bill;
-  const expected = Math.round((b.subtotal - b.discount + b.tax_amount + b.service_charge + b.round_off) * 100) / 100;
-  assert.equal(b.discount, 10);
-  assert.ok(Math.abs(b.total - expected) < 0.02, `total ${b.total} != ${expected}`);
-});
+  assert.equal(res.status, 201, res.text);
+  const bill = res.body.bill;
+  assert.equal(bill.items.length, 2);
+  assert.equal(bill.subtotal, 360);
+  assert.equal(bill.tax_amount, 0);
+  assert.equal(bill.total, 360);
+  assert.equal(bill.cash_amount, 1000);
+  assert.ok(bill.bill_no.startsWith('INV-'));
 
-test('insufficient payment is rejected', async () => {
-  const res = await call('POST', '/api/bills', {
+  const short = await call('POST', '/api/bills', {
     token: tokens.staff,
     body: {
-      items: [{ product_id: liquor.id, variant_id: pour30.id, qty: 1 }],
+      items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 1 }],
       payment_mode: 'cash',
       cash_amount: 1,
-      client_uuid: 'test-underpay',
+      client_uuid: 'test-underpay-1',
     },
   });
-  assert.equal(res.status, 400, JSON.stringify(res.body));
+  assert.equal(short.status, 400, 'cash payment below the total must be rejected');
 });
 
-test('table management: open a tab, add pours, settle with UPI', async () => {
-  const tables = (await call('GET', '/api/tables', { token: tokens.staff })).body.tables;
-  const free = tables.find((t) => t.status === 'free');
-  assert.ok(free, 'expected a free table');
+test('a running table tab can be opened, served and settled', async () => {
+  const table = state.tables.find((t) => t.label === 'T1');
+  const before = bottlesOf(state.liquor.id);
+  const open = await call('POST', `/api/tables/${table.id}/open`, { token: tokens.staff, body: { guests: 4 } });
+  assert.equal(open.status, 201, open.text);
+  const orderId = open.body.order.id;
 
-  const opened = await call('POST', `/api/tables/${free.id}/open`, {
+  const pour60 = state.liquor.variants.find((v) => v.ml === 60);
+  const add = await call('POST', `/api/orders/${orderId}/items`, {
     token: tokens.staff,
-    body: { guests: 4, captain: 'Test Captain' },
+    body: { product_id: state.liquor.id, variant_id: pour60.id, qty: 2 },
   });
-  assert.equal(opened.status, 201, JSON.stringify(opened.body));
-  const orderId = opened.body.order.id;
+  assert.equal(add.status, 201, add.text);
+  assert.equal(add.body.order.items.length, 1);
+  assert.equal(add.body.order.subtotal, 240);
 
-  const added = await call('POST', `/api/orders/${orderId}/items`, {
+  const pay = await call('POST', `/api/orders/${orderId}/pay`, {
     token: tokens.staff,
-    body: { product_id: liquor.id, variant_id: pour60.id, qty: 2 },
+    body: { payment_mode: 'cash', cash_amount: 240, client_uuid: 'test-tab-pay-1' },
   });
-  assert.equal(added.status, 201);
-  assert.equal(added.body.order.items.length, 1);
+  assert.equal(pay.status, 201, pay.text);
+  assert.equal(pay.body.bill.total, 240);
+  const consumedMl = (before - bottlesOf(state.liquor.id)) * 180;
+  assert.ok(Math.abs(consumedMl - 120) < 0.05, `expected 120 ml deducted, got ${consumedMl}`);
 
-  const before = stockOf(liquor.id);
-  const paid = await call('POST', `/api/orders/${orderId}/pay`, {
-    token: tokens.staff,
-    body: { payment_mode: 'upi', upi_amount: 5000, client_uuid: 'test-tab-1' },
-  });
-  assert.equal(paid.status, 201, JSON.stringify(paid.body));
-  assert.equal(paid.body.bill.table_id, free.id);
-  assert.equal(before - stockOf(liquor.id), 120, 'tab with two 60ml pours deducts 120ml');
-
-  const after = (await call('GET', '/api/tables', { token: tokens.staff })).body.tables.find((t) => t.id === free.id);
-  assert.equal(after.status, 'free', 'table should be released after settlement');
+  const tables = await call('GET', '/api/tables', { token: tokens.staff });
+  const settled = tables.body.tables.find((t) => t.id === table.id);
+  assert.equal(settled.status, 'free', 'table must be free after payment');
+  assert.equal(settled.current_order_id, null);
 });
 
-test('table status can be set to reserved', async () => {
-  const tables = (await call('GET', '/api/tables', { token: tokens.staff })).body.tables;
-  const target = tables.find((t) => t.status === 'free');
-  const res = await call('POST', `/api/tables/${target.id}/status`, { token: tokens.staff, body: { status: 'reserved' } });
-  assert.equal(res.status, 200);
+test('a table can be marked reserved', async () => {
+  const table = state.tables.find((t) => t.label === 'T2');
+  const res = await call('POST', `/api/tables/${table.id}/status`, {
+    token: tokens.staff,
+    body: { status: 'reserved' },
+  });
+  assert.equal(res.status, 200, res.text);
   assert.equal(res.body.table.status, 'reserved');
 });
 
-test('staff cannot manage products, manager can', async () => {
-  const denied = await call('POST', '/api/products', {
+test('owner/manager can rename a table and change its zone; staff cannot', async () => {
+  const table = state.tables.find((t) => t.label === 'T3');
+  const denied = await call('PATCH', `/api/tables/${table.id}`, {
     token: tokens.staff,
-    body: { name: 'Denied Product', category_id: 1, unit_type: 'unit', price: 100 },
+    body: { zone: 'Garden View' },
   });
   assert.equal(denied.status, 403);
 
-  const cat = (await call('GET', '/api/categories', { token: tokens.manager })).body.categories[0];
-  const created = await call('POST', '/api/products', {
+  const ok = await call('PATCH', `/api/tables/${table.id}`, {
     token: tokens.manager,
-    body: { name: 'Test Brand Whisky', category_id: cat.id, unit_type: 'ml', peg_price: 60, stock_qty: 750 },
+    body: { label: 'T3', zone: 'Garden View', capacity: 6 },
   });
-  assert.equal(created.status, 201, JSON.stringify(created.body));
-  const product = created.body.product;
-  assert.equal(product.variants.length, 6, 'liquor product gets all six pour sizes');
-  assert.deepEqual(
-    product.variants.map((v) => v.ml).sort((a, b) => a - b),
-    [30, 60, 90, 120, 150, 180],
-  );
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.body.table.zone, 'Garden View');
+  assert.equal(ok.body.table.capacity, 6);
+
+  const renamed = await call('PATCH', `/api/tables/${table.id}`, {
+    token: tokens.owner,
+    body: { label: 'T3 Corner', zone: 'Garden View' },
+  });
+  assert.equal(renamed.status, 200, renamed.text);
+  assert.equal(renamed.body.table.label, 'T3 Corner');
 });
 
-test('stock adjustment writes a ledger entry', async () => {
-  const res = await call('POST', `/api/products/${liquor.id}/stock`, {
+test('stock entry is counted in 180 ml bottles and managers can restock', async () => {
+  const before = bottlesOf(state.liquor.id);
+  const res = await call('POST', `/api/products/${state.liquor.id}/stock`, {
     token: tokens.manager,
-    body: { change_qty: 750, movement: 'purchase', note: 'Test restock' },
+    body: { change_qty: 12, movement: 'purchase', note: '12 sealed bottles received' },
   });
-  assert.equal(res.status, 200, JSON.stringify(res.body));
-  assert.ok(res.body.product.stock_qty >= 750);
-  const row = db
-    .prepare("SELECT * FROM stock_ledger WHERE product_id = ? AND movement = 'purchase' ORDER BY id DESC LIMIT 1")
-    .get(liquor.id);
-  assert.equal(row.change_qty, 750);
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.body.product.stock_bottles, before + 12);
+  assert.equal(res.body.product.sealed_bottles, before + 12);
+  assert.equal(res.body.product.stock_qty, (before + 12) * 180);
 });
 
-test('reports reflect the bills created above', async () => {
-  const dash = await call('GET', '/api/reports/dashboard', { token: tokens.manager });
-  assert.equal(dash.status, 200);
-  assert.ok(dash.body.summary.revenue > 0, 'dashboard should report revenue');
-  assert.ok(dash.body.summary.bills >= 3);
-  assert.ok(dash.body.summary.upi > 0 && dash.body.summary.cash > 0, 'both cash and UPI should be reported');
-
-  const items = await call('GET', '/api/reports/items', { token: tokens.manager });
-  assert.equal(items.status, 200);
-  assert.ok(items.body.items.some((i) => i.product_name === liquor.name));
-
-  const stock = await call('GET', '/api/reports/stock', { token: tokens.manager });
-  assert.ok(stock.body.stock.length >= 1);
+test('staff cannot create products or restock', async () => {
+  const create = await call('POST', '/api/products', {
+    token: tokens.staff,
+    body: { name: 'Blocked Product', unit_type: 'unit', stock_qty: 1, price: 10 },
+  });
+  assert.equal(create.status, 403);
+  const stock = await call('POST', `/api/products/${state.liquor.id}/stock`, {
+    token: tokens.staff,
+    body: { change_qty: 1 },
+  });
+  assert.equal(stock.status, 403);
 });
 
-test('manager can void a bill and stock is returned', async () => {
+test('manager can add a new liquor product priced per serve size', async () => {
+  const res = await call('POST', '/api/products', {
+    token: tokens.manager,
+    body: {
+      name: 'Test Single Malt',
+      category_id: state.liquor.category_id,
+      unit_type: 'ml',
+      stock_bottles: 24,
+      peg_price: 120,
+      cost_price: 900,
+      low_stock_qty: 3,
+    },
+  });
+  assert.equal(res.status, 201, res.text);
+  const product = res.body.product;
+  assert.equal(product.stock_bottles, 24);
+  assert.equal(product.sealed_bottles, 24);
+  assert.equal(product.variants.length, 6);
+  assert.equal(product.variants[0].price, 120);
+  assert.equal(product.variants[2].price, 360);
+  assert.equal(product.variants[5].price, 720);
+  state.custom = product;
+});
+
+test('voiding a bill returns the bottle fraction to stock', async () => {
+  const pour90 = state.liquor.variants.find((v) => v.ml === 90);
+  const before = bottlesOf(state.liquor.id);
   const created = await call('POST', '/api/bills', {
     token: tokens.staff,
     body: {
-      items: [{ product_id: liquor.id, variant_id: pour90.id, qty: 1 }],
+      items: [{ product_id: state.liquor.id, variant_id: pour90.id, qty: 1 }],
       payment_mode: 'cash',
+      cash_amount: 210,
       client_uuid: 'test-void-1',
     },
   });
-  const billId = created.body.bill.id;
-  const before = stockOf(liquor.id);
-  const voided = await call('POST', `/api/bills/${billId}/void`, {
+  assert.equal(created.status, 201, created.text);
+  assert.ok(bottlesOf(state.liquor.id) < before);
+
+  const denied = await call('POST', `/api/bills/${created.body.bill.id}/void`, {
+    token: tokens.staff,
+    body: { reason: 'nope' },
+  });
+  assert.equal(denied.status, 403, 'only a manager or owner may void a bill');
+
+  const res = await call('POST', `/api/bills/${created.body.bill.id}/void`, {
     token: tokens.manager,
-    body: { reason: 'Test correction' },
+    body: { reason: 'Wrong serve size' },
   });
-  assert.equal(voided.status, 200, JSON.stringify(voided.body));
-  assert.equal(stockOf(liquor.id), before + 90, 'voiding returns the poured quantity to stock');
-
-  const staffVoid = await call('POST', `/api/bills/${billId}/void`, { token: tokens.staff, body: {} });
-  assert.equal(staffVoid.status, 403, 'staff must not void bills');
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.body.bill.status, 'void');
+  assert.equal(bottlesOf(state.liquor.id), before, 'voided sale must return the 90 ml (0.5 bottle)');
 });
 
-test('offline sync endpoint reports queued bills as already synced', async () => {
-  const res = await call('GET', '/api/sync/state', { token: tokens.staff });
-  assert.equal(res.status, 200);
-  assert.ok(Array.isArray(res.body.products));
-  assert.ok(res.body.server_time);
-
-  const push = await call('POST', '/api/sync/push', {
-    token: tokens.staff,
-    body: {
-      device_id: 'test-device',
-      bills: [
-        {
-          client_uuid: 'test-offline-1',
-          items: [{ product_id: liquor.id, variant_id: pour30.id, qty: 1 }],
-          payment_mode: 'cash',
-          cash_amount: 500,
-          offline: true,
-          created_at: new Date().toISOString(),
-        },
-      ],
-    },
-  });
-  assert.ok([200, 201].includes(push.status), JSON.stringify(push.body));
-  const again = await call('POST', '/api/sync/push', {
-    token: tokens.staff,
-    body: {
-      device_id: 'test-device',
-      bills: [
-        {
-          client_uuid: 'test-offline-1',
-          items: [{ product_id: liquor.id, variant_id: pour30.id, qty: 1 }],
-          payment_mode: 'cash',
-          cash_amount: 500,
-          offline: true,
-        },
-      ],
-    },
-  });
-  assert.ok([200, 201].includes(again.status));
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM bills WHERE client_uuid = ?').get('test-offline-1').c, 1);
+test('sales reports aggregate paid bills by payment mode', async () => {
+  const res = await call('GET', '/api/reports/sales', { token: tokens.manager });
+  assert.equal(res.status, 200, res.text);
+  assert.ok(res.body.totals.bills >= 3);
+  assert.ok(res.body.totals.revenue > 0);
+  assert.ok(res.body.totals.cash > 0);
+  assert.ok(Array.isArray(res.body.by_mode) && res.body.by_mode.length >= 1);
 });
 
-test('settings can be read and updated by the owner', async () => {
-  const res = await call('PUT', '/api/admin/settings', {
+test('stock ledger records bottle movements', async () => {
+  const res = await call('GET', `/api/stock/ledger?product_id=${state.liquor.id}`, { token: tokens.manager });
+  assert.equal(res.status, 200, res.text);
+  assert.ok(res.body.ledger.length >= 3);
+  const movements = new Set(res.body.ledger.map((l) => l.movement));
+  assert.ok(movements.has('sale'));
+  assert.ok(movements.has('purchase') || movements.has('opening'));
+});
+
+test('offline sync state and push replay bills idempotently', async () => {
+  const pull = await call('GET', '/api/sync/state', { token: tokens.staff });
+  assert.equal(pull.status, 200);
+  assert.equal(pull.body.tables.length, 20);
+  assert.ok(pull.body.products.length > 0);
+
+  const pour30 = state.liquor.variants.find((v) => v.ml === 30);
+  const payload = {
+    device_id: 'test-device',
+    bills: [
+      {
+        client_uuid: 'offline-bill-1',
+        items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 1 }],
+        payment_mode: 'cash',
+        cash_amount: 70,
+      },
+    ],
+  };
+  const push = await call('POST', '/api/sync/push', { token: tokens.staff, body: payload });
+  assert.equal(push.status, 200, push.text);
+  assert.equal(push.body.results[0].status, 'synced');
+
+  const again = await call('POST', '/api/sync/push', { token: tokens.staff, body: payload });
+  assert.equal(again.status, 200);
+  assert.equal(again.body.results[0].status, 'duplicate');
+});
+
+test('owner check-in occupies a room with guest details; manager and staff cannot', async () => {
+  const room = state.rooms.find((r) => r.room_no === '101');
+  const body = {
+    guest_name: 'Ravi Kumar',
+    guest_phone: '9876500001',
+    guests: 2,
+    rate_per_night: 1500,
+    expected_check_out_at: new Date(Date.now() + 2 * 86400000).toISOString(),
+  };
+
+  const managerDenied = await call('POST', `/api/rooms/${room.id}/checkin`, { token: tokens.manager, body });
+  assert.equal(managerDenied.status, 403, 'manager may not check in guests');
+  const staffDenied = await call('POST', `/api/rooms/${room.id}/checkin`, { token: tokens.staff, body });
+  assert.equal(staffDenied.status, 403, 'staff may not check in guests');
+
+  const res = await call('POST', `/api/rooms/${room.id}/checkin`, { token: tokens.owner, body });
+  assert.equal(res.status, 201, res.text);
+
+  const rooms = await call('GET', '/api/rooms', { token: tokens.staff });
+  const occupied = rooms.body.rooms.find((r) => r.id === room.id);
+  assert.equal(occupied.status, 'occupied');
+  assert.equal(occupied.guest_name, 'Ravi Kumar');
+  assert.equal(occupied.guest_phone, '9876500001');
+  assert.ok(occupied.stay_id);
+  assert.equal(rooms.body.summary.occupied, 1);
+  assert.equal(rooms.body.summary.available, 8);
+  state.room101 = room;
+});
+
+test('owner check-out frees the room and records room charges', async () => {
+  const res = await call('POST', `/api/rooms/${state.room101.id}/checkout`, {
     token: tokens.owner,
-    body: { hotel_name: 'Hotel Sagarika', tax_percent: '5', upi_id: 'sagarika@upi' },
+    body: { payment_mode: 'cash', amount_paid: 3000, extra_charges: 0 },
   });
-  assert.equal(res.status, 200, JSON.stringify(res.body));
-  const boot = await call('GET', '/api/bootstrap', { token: tokens.owner });
-  assert.equal(boot.body.settings.hotel_name, 'Hotel Sagarika');
-  assert.equal(boot.body.settings.upi_id, 'sagarika@upi');
+  assert.equal(res.status, 200, res.text);
+  assert.ok(res.body.bill, 'check-out must return a bill');
+  assert.ok(res.body.bill.nights >= 1);
+  assert.equal(res.body.bill.room_charges, res.body.bill.nights * 1500);
+  assert.equal(res.body.bill.total, res.body.bill.room_charges);
+
+  const rooms = await call('GET', '/api/rooms', { token: tokens.staff });
+  const room = rooms.body.rooms.find((r) => r.id === state.room101.id);
+  assert.equal(room.status, 'available');
+  assert.equal(room.guest_name, null);
+  assert.equal(rooms.body.summary.available, 9);
 });
 
-test('audit log records bill creation', async () => {
-  const res = await call('GET', '/api/admin/audit', { token: tokens.owner });
-  assert.equal(res.status, 200);
-  assert.ok(res.body.audit.length > 0, 'audit log should not be empty');
+test('room occupancy history keeps the past stay', async () => {
+  const res = await call('GET', '/api/rooms/history', { token: tokens.manager });
+  assert.equal(res.status, 200, res.text);
+  const stay = res.body.history.find((h) => h.guest_name === 'Ravi Kumar');
+  assert.ok(stay, 'expected the checked-out stay in history');
+  assert.equal(stay.room_no, '101');
+  assert.equal(stay.status, 'checked_out');
+  assert.ok(stay.check_in_at);
+  assert.ok(stay.check_out_at);
+});
+
+test('owner can release an occupied room; manager cannot', async () => {
+  const room = state.rooms.find((r) => r.room_no === '102');
+  const checkIn = await call('POST', `/api/rooms/${room.id}/checkin`, {
+    token: tokens.owner,
+    body: { guest_name: 'Walk In', guests: 1, rate_per_night: 1500 },
+  });
+  assert.equal(checkIn.status, 201, checkIn.text);
+
+  const denied = await call('POST', `/api/rooms/${room.id}/release`, {
+    token: tokens.manager,
+    body: { reason: 'test' },
+  });
+  assert.equal(denied.status, 403);
+
+  const res = await call('POST', `/api/rooms/${room.id}/release`, {
+    token: tokens.owner,
+    body: { reason: 'Guest left early' },
+  });
+  assert.equal(res.status, 200, res.text);
+
+  const rooms = await call('GET', '/api/rooms', { token: tokens.owner });
+  assert.equal(rooms.body.rooms.find((r) => r.id === room.id).status, 'available');
+});
+
+test('manager can edit room number/name but not tariffs', async () => {
+  const room = state.rooms.find((r) => r.room_no === '103');
+  const ok = await call('PATCH', `/api/rooms/${room.id}`, {
+    token: tokens.manager,
+    body: { name: 'Deluxe 103' },
+  });
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.body.room.name, 'Deluxe 103');
+
+  const denied = await call('PATCH', `/api/rooms/${room.id}`, {
+    token: tokens.manager,
+    body: { rate_per_night: 999 },
+  });
+  assert.equal(denied.status, 403, 'only the owner may change room tariffs');
+});
+
+test('dashboard keeps restaurant, lodging, billing, inventory and reports separate', async () => {
+  const res = await call('GET', '/api/dashboard', { token: tokens.owner });
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.body.restaurant.tables_total, 20);
+  assert.equal(res.body.lodging.total, 9);
+  assert.ok(res.body.restaurant.revenue > 0);
+  assert.ok(res.body.billing.revenue > 0);
+  assert.ok(res.body.inventory.total_bottles > 0);
+  assert.ok(res.body.reports.week_bills >= 1);
+  // Restaurant occupancy and room occupancy stay in separate sections.
+  assert.equal(typeof res.body.restaurant.occupied, 'number');
+  assert.equal(typeof res.body.lodging.occupied, 'number');
+  assert.ok(res.body.lodging.available + res.body.lodging.occupied + res.body.lodging.maintenance <= 9);
+});
+
+test('settings and audit log are writable by managers', async () => {
+  const put = await call('PUT', '/api/admin/settings', {
+    token: tokens.manager,
+    body: { hotel_name: 'Hotel Sagarika', tax_percent: 0 },
+  });
+  assert.equal(put.status, 200, put.text);
+  assert.equal(put.body.settings.hotel_name, 'Hotel Sagarika');
+
+  const audit = await call('GET', '/api/admin/audit', { token: tokens.manager });
+  assert.equal(audit.status, 200);
+  assert.ok(audit.body.audit.length > 0);
+  assert.ok(audit.body.audit.some((a) => a.action === 'bill.create'));
+  assert.ok(audit.body.audit.some((a) => a.action === 'room.checkin'));
+});
+
+test('unknown API routes return a JSON 404', async () => {
+  const res = await call('GET', '/api/nope', { token: tokens.staff });
+  assert.equal(res.status, 404);
+  assert.match(res.body.error, /Unknown API route/);
 });
