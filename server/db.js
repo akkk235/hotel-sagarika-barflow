@@ -88,7 +88,6 @@ CREATE TABLE IF NOT EXISTS suppliers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   phone TEXT,
-  gstin TEXT,
   address TEXT,
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
@@ -190,11 +189,6 @@ CREATE TABLE IF NOT EXISTS bills (
   customer_name TEXT,
   customer_phone TEXT,
   subtotal REAL NOT NULL DEFAULT 0,
-  discount REAL NOT NULL DEFAULT 0,
-  tax_percent REAL NOT NULL DEFAULT 0,
-  tax_amount REAL NOT NULL DEFAULT 0,
-  service_charge REAL NOT NULL DEFAULT 0,
-  round_off REAL NOT NULL DEFAULT 0,
   total REAL NOT NULL DEFAULT 0,
   payment_mode TEXT NOT NULL CHECK (payment_mode IN ('cash','upi','card','split','credit')),
   cash_amount REAL NOT NULL DEFAULT 0,
@@ -210,6 +204,10 @@ CREATE TABLE IF NOT EXISTS bills (
   client_uuid TEXT UNIQUE,
   synced_from_offline INTEGER NOT NULL DEFAULT 0,
   notes TEXT,
+  deleted_at TEXT,
+  deleted_by INTEGER REFERENCES users(id),
+  deleted_by_name TEXT,
+  delete_reason TEXT,
   created_at TEXT NOT NULL,
   paid_at TEXT NOT NULL
 );
@@ -223,11 +221,27 @@ CREATE TABLE IF NOT EXISTS payments (
   created_at TEXT NOT NULL
 );
 
+-- Permanent record of every deleted bill. Rows are never removed, so financial
+-- history survives even after a bill stops counting as an active sale.
+CREATE TABLE IF NOT EXISTS bill_deletions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bill_id INTEGER NOT NULL REFERENCES bills(id),
+  bill_no TEXT NOT NULL,
+  bill_date TEXT NOT NULL,
+  amount REAL NOT NULL,
+  payment_mode TEXT,
+  status_before TEXT,
+  deleted_by INTEGER REFERENCES users(id),
+  deleted_by_name TEXT,
+  deleted_at TEXT NOT NULL,
+  reason TEXT,
+  snapshot TEXT
+);
+
 CREATE TABLE IF NOT EXISTS customers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   phone TEXT UNIQUE,
-  gstin TEXT,
   address TEXT,
   loyalty_points INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
@@ -340,6 +354,40 @@ if (!hasColumn('products', 'stock_bottles')) {
   db.exec(`UPDATE products SET low_stock_qty = ROUND(low_stock_qty / 180.0, 2)
            WHERE unit_type = 'ml' AND low_stock_qty > 180`);
 }
+// v3: GST/tax, service charge and discounts are removed for good. A bill is exactly
+// the sum of its line prices, and deleting a bill is a soft delete that keeps the
+// bill, its items and its payment records for financial tracking.
+if (!hasColumn('users', 'pin_hash')) {
+  db.exec('ALTER TABLE users ADD COLUMN pin_hash TEXT');
+}
+if (!hasColumn('bills', 'deleted_at')) {
+  db.exec('ALTER TABLE bills ADD COLUMN deleted_at TEXT');
+  db.exec('ALTER TABLE bills ADD COLUMN deleted_by INTEGER');
+  db.exec('ALTER TABLE bills ADD COLUMN deleted_by_name TEXT');
+  db.exec('ALTER TABLE bills ADD COLUMN delete_reason TEXT');
+}
+for (const legacy of ['discount', 'tax_percent', 'tax_amount', 'service_charge', 'round_off']) {
+  if (hasColumn('bills', legacy)) {
+    try {
+      db.exec(`ALTER TABLE bills DROP COLUMN ${legacy}`);
+    } catch {
+      /* very old SQLite builds keep the column; it is simply no longer used */
+    }
+  }
+}
+for (const table of ['suppliers', 'customers']) {
+  if (hasColumn(table, 'gstin')) {
+    try {
+      db.exec(`ALTER TABLE ${table} DROP COLUMN gstin`);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+db.exec("DELETE FROM settings WHERE key IN ('gstin','tax_percent','service_charge_percent')");
+db.exec('UPDATE bills SET total = subtotal WHERE total <> subtotal');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bills_deleted ON bills(deleted_at)');
+
 db.exec("UPDATE products SET bottle_size_ml = 180 WHERE unit_type = 'ml'");
 db.exec(
   "UPDATE products SET stock_qty = ROUND(stock_bottles * 180, 2) WHERE unit_type = 'ml'",

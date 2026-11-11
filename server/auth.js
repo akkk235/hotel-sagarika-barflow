@@ -26,6 +26,32 @@ export function verifyPassword(plain, hash) {
   return bcrypt.compareSync(plain, hash);
 }
 
+/** bcrypt hash for the Owner PIN that authorises destructive actions. */
+export function hashPin(pin) {
+  return bcrypt.hashSync(String(pin), 10);
+}
+
+/**
+ * Verify the signed-in Owner's PIN for destructive actions (bill deletion).
+ * The role claim alone is never enough: the PIN must match the stored hash.
+ */
+export function verifyOwnerPin(user, pin) {
+  if (user?.role !== 'owner') {
+    return { ok: false, status: 403, message: 'Only the Owner can authorise this action' };
+  }
+  const digits = String(pin ?? '').trim();
+  if (!/^\d{4,8}$/.test(digits)) {
+    return { ok: false, status: 400, message: 'Enter your 4-digit Owner PIN' };
+  }
+  const row = db.prepare('SELECT pin_hash FROM users WHERE id = ?').get(user.id);
+  if (!row?.pin_hash) {
+    return { ok: false, status: 400, message: 'Owner PIN is not set yet. Set it under More → Security.' };
+  }
+  return bcrypt.compareSync(digits, row.pin_hash)
+    ? { ok: true }
+    : { ok: false, status: 403, message: 'Incorrect Owner PIN' };
+}
+
 export function issueToken(user, device = 'web') {
   const jti = crypto.randomUUID();
   const createdAt = nowISO();
