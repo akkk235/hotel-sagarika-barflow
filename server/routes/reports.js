@@ -17,8 +17,8 @@ router.get('/dashboard', authenticate, (req, res) => {
   const summary = dashboardSummary(date);
   const recent = db
     .prepare(
-      `SELECT id, bill_no, total, payment_mode, table_label, cashier_name, created_at
-       FROM bills WHERE bill_date = ? AND status = 'paid' ORDER BY id DESC LIMIT 8`,
+      `SELECT id, bill_no, total, payment_mode, table_label, cashier_name, created_at, status, deleted_at
+       FROM bills WHERE bill_date = ? AND status = 'paid' AND deleted_at IS NULL ORDER BY id DESC LIMIT 8`,
     )
     .all(date);
   const topItems = db
