@@ -108,13 +108,15 @@ test('protected routes reject anonymous requests', async () => {
   assert.equal(res.status, 401);
 });
 
-test('tax is configurable; pin it off for deterministic bill totals', async () => {
+test('GST and tax settings no longer exist', async () => {
   const res = await call('PUT', '/api/admin/settings', {
     token: tokens.manager,
-    body: { tax_percent: 0, service_charge_percent: 0 },
+    body: { gstin: '29ABCDE1234F1Z5', tax_percent: 5, service_charge_percent: 5 },
   });
   assert.equal(res.status, 200, res.text);
-  assert.equal(Number(res.body.settings.tax_percent), 0);
+  assert.equal(res.body.settings.gstin, undefined);
+  assert.equal(res.body.settings.tax_percent, undefined);
+  assert.equal(res.body.settings.service_charge_percent, undefined);
 });
 
 test('bootstrap seeds exactly 20 restaurant tables T1-T20', async () => {
@@ -290,23 +292,106 @@ test('bill totals add lines and reject an underpayment', async () => {
   assert.equal(short.status, 400, 'cash payment below the total must be rejected');
 });
 
-test('a configured tax rate is applied to the taxable amount', async () => {
-  await call('PUT', '/api/admin/settings', { token: tokens.manager, body: { tax_percent: 5 } });
+test('only the Owner can delete a bill, and the record is never erased', async () => {
+  const pour30 = state.liquor.variants.find((v) => v.ml === 30);
+  const created = await call('POST', '/api/bills', {
+    token: tokens.staff,
+    body: {
+      items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 2 }],
+      payment_mode: 'cash',
+      cash_amount: 140,
+      client_uuid: 'test-delete-1',
+    },
+  });
+  assert.equal(created.status, 201, created.text);
+  const bill = created.body.bill;
+  assert.equal(bill.total, 140);
+  const stockBefore = bottlesOf(state.liquor.id);
+
+  // Staff and managers are refused even when they supply the correct PIN.
+  const staffTry = await call('DELETE', `/api/bills/${bill.id}`, {
+    token: tokens.staff,
+    body: { pin: '4321' },
+  });
+  assert.equal(staffTry.status, 403);
+  const managerTry = await call('DELETE', `/api/bills/${bill.id}`, {
+    token: tokens.manager,
+    body: { pin: '4321' },
+  });
+  assert.equal(managerTry.status, 403);
+
+  // The Owner needs the PIN; a wrong or missing PIN must not delete anything.
+  const wrongPin = await call('DELETE', `/api/bills/${bill.id}`, {
+    token: tokens.owner,
+    body: { pin: '0000' },
+  });
+  assert.ok(wrongPin.status >= 400, 'a wrong PIN must be rejected');
+  const noPin = await call('DELETE', `/api/bills/${bill.id}`, { token: tokens.owner, body: {} });
+  assert.ok(noPin.status >= 400, 'a missing PIN must be rejected');
+  const stillThere = db.prepare('SELECT status, deleted_at FROM bills WHERE id = ?').get(bill.id);
+  assert.equal(stillThere.status, 'paid');
+  assert.equal(stillThere.deleted_at, null);
+
+  const ok = await call('DELETE', `/api/bills/${bill.id}`, {
+    token: tokens.owner,
+    body: { pin: '4321', reason: 'test correction' },
+  });
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.body.deletion.bill_no, bill.bill_no);
+  assert.equal(ok.body.deletion.amount, 140);
+  assert.equal(ok.body.deletion.bill_date, bill.bill_date);
+  assert.ok(ok.body.deletion.deleted_by_name, 'the deleting user is recorded');
+  assert.ok(ok.body.deletion.deleted_at, 'the deletion time is recorded');
+
+  // The bill row and its payment records survive; only the flags change.
+  const row = db.prepare('SELECT * FROM bills WHERE id = ?').get(bill.id);
+  assert.equal(row.total, 140);
+  assert.ok(row.deleted_at);
+  assert.ok(db.prepare('SELECT COUNT(*) AS n FROM payments WHERE bill_id = ?').get(bill.id).n >= 1);
+  assert.ok(
+    db.prepare("SELECT COUNT(*) AS n FROM bill_deletions WHERE bill_id = ?").get(bill.id).n === 1,
+  );
+
+  // Stock returns to the shelf and the bill stops counting as an active sale.
+  assert.ok(bottlesOf(state.liquor.id) > stockBefore);
+  const sales = await call('GET', `/api/reports/sales?from=${bill.bill_date}&to=${bill.bill_date}`, {
+    token: tokens.manager,
+  });
+  assert.equal(sales.status, 200, sales.text);
+  const history = await call('GET', '/api/bills/deleted', { token: tokens.manager });
+  assert.equal(history.status, 200, history.text);
+  assert.ok(history.body.deletions.some((d) => d.bill_no === bill.bill_no));
+  assert.equal(history.body.deletions[0].reason, 'test correction');
+
+  const audit = await call('GET', '/api/admin/audit', { token: tokens.manager });
+  assert.ok(audit.body.audit.some((a) => a.action === 'bill.delete' && a.entity_id === bill.id));
+
+  // Deleting the same bill twice is refused.
+  const twice = await call('DELETE', `/api/bills/${bill.id}`, {
+    token: tokens.owner,
+    body: { pin: '4321' },
+  });
+  assert.equal(twice.status, 400);
+});
+
+test('a bill total is exactly the selling price with no tax or discount', async () => {
   const pour30 = state.liquor.variants.find((v) => v.ml === 30);
   const res = await call('POST', '/api/bills', {
     token: tokens.staff,
     body: {
       items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 2 }],
       payment_mode: 'cash',
-      cash_amount: 147,
-      client_uuid: 'test-tax-1',
+      cash_amount: 140,
+      client_uuid: 'test-notax-1',
     },
   });
   assert.equal(res.status, 201, res.text);
-  assert.equal(res.body.bill.subtotal, 140);
-  assert.equal(res.body.bill.tax_amount, 7);
-  assert.equal(res.body.bill.total, 147);
-  await call('PUT', '/api/admin/settings', { token: tokens.manager, body: { tax_percent: 0 } });
+  const bill = res.body.bill;
+  assert.equal(bill.subtotal, 140);
+  assert.equal(bill.total, 140, 'the guest pays the exact selling price');
+  for (const key of ['tax_amount', 'tax_percent', 'discount', 'service_charge', 'round_off']) {
+    assert.equal(bill[key], undefined, `${key} must not exist on a bill`);
+  }
 });
 
 test('a running table tab can be opened, served and settled', async () => {
@@ -619,7 +704,7 @@ test('dashboard keeps restaurant, lodging, billing, inventory and reports separa
 test('settings and audit log are writable by managers', async () => {
   const put = await call('PUT', '/api/admin/settings', {
     token: tokens.manager,
-    body: { hotel_name: 'Hotel Sagarika', tax_percent: 0 },
+    body: { hotel_name: 'Hotel Sagarika' },
   });
   assert.equal(put.status, 200, put.text);
   assert.equal(put.body.settings.hotel_name, 'Hotel Sagarika');
