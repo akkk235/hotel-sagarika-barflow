@@ -1,0 +1,328 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import Database from 'better-sqlite3';
+
+const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'barflow.db');
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+export const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+db.pragma('busy_timeout = 5000');
+
+/**
+ * Hotel Sagarika BarFlow schema - exactly 20 tables.
+ * 1 users, 2 sessions, 3 categories, 4 products, 5 product_variants,
+ * 6 suppliers, 7 purchases, 8 purchase_items, 9 stock_ledger, 10 dining_tables,
+ * 11 table_sessions, 12 orders, 13 order_items, 14 bills, 15 payments,
+ * 16 customers, 17 expenses, 18 sync_log, 19 settings, 20 audit_logs
+ */
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('owner','manager','staff')),
+  phone TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  jti TEXT NOT NULL UNIQUE,
+  device TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  color TEXT DEFAULT '#c2410c',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+  brand TEXT,
+  sku TEXT UNIQUE,
+  unit_type TEXT NOT NULL DEFAULT 'ml' CHECK (unit_type IN ('ml','unit')),
+  bottle_size_ml INTEGER,
+  stock_qty REAL NOT NULL DEFAULT 0,
+  low_stock_qty REAL NOT NULL DEFAULT 0,
+  cost_price REAL NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS product_variants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  ml INTEGER NOT NULL DEFAULT 0,
+  consume_qty REAL NOT NULL DEFAULT 0,
+  price REAL NOT NULL DEFAULT 0,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  UNIQUE (product_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS suppliers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  phone TEXT,
+  gstin TEXT,
+  address TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS purchases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+  invoice_no TEXT,
+  purchase_date TEXT NOT NULL,
+  total_amount REAL NOT NULL DEFAULT 0,
+  paid_amount REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS purchase_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  purchase_id INTEGER NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  bottles REAL NOT NULL DEFAULT 1,
+  ml_per_bottle INTEGER NOT NULL DEFAULT 750,
+  total_ml REAL NOT NULL DEFAULT 0,
+  unit_cost REAL NOT NULL DEFAULT 0,
+  amount REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS stock_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  change_qty REAL NOT NULL,
+  balance_qty REAL NOT NULL,
+  movement TEXT NOT NULL CHECK (movement IN ('opening','purchase','sale','adjustment','wastage','return')),
+  ref_type TEXT,
+  ref_id INTEGER,
+  note TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dining_tables (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL UNIQUE,
+  zone TEXT NOT NULL DEFAULT 'Main Hall',
+  capacity INTEGER NOT NULL DEFAULT 4,
+  status TEXT NOT NULL DEFAULT 'free' CHECK (status IN ('free','occupied','reserved','cleaning')),
+  current_order_id INTEGER,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS table_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  table_id INTEGER NOT NULL REFERENCES dining_tables(id) ON DELETE CASCADE,
+  order_id INTEGER,
+  guests INTEGER NOT NULL DEFAULT 1,
+  opened_by INTEGER REFERENCES users(id),
+  opened_at TEXT NOT NULL,
+  closed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_no TEXT NOT NULL UNIQUE,
+  table_id INTEGER REFERENCES dining_tables(id) ON DELETE SET NULL,
+  order_date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','billed','void')),
+  guests INTEGER NOT NULL DEFAULT 1,
+  subtotal REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  variant_id INTEGER NOT NULL REFERENCES product_variants(id),
+  product_name TEXT NOT NULL,
+  variant_label TEXT NOT NULL,
+  ml INTEGER NOT NULL DEFAULT 0,
+  qty REAL NOT NULL DEFAULT 1,
+  unit_price REAL NOT NULL DEFAULT 0,
+  line_total REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bills (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bill_no TEXT NOT NULL UNIQUE,
+  bill_date TEXT NOT NULL,
+  order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+  table_id INTEGER REFERENCES dining_tables(id) ON DELETE SET NULL,
+  table_label TEXT,
+  customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+  customer_name TEXT,
+  customer_phone TEXT,
+  subtotal REAL NOT NULL DEFAULT 0,
+  discount REAL NOT NULL DEFAULT 0,
+  tax_percent REAL NOT NULL DEFAULT 0,
+  tax_amount REAL NOT NULL DEFAULT 0,
+  service_charge REAL NOT NULL DEFAULT 0,
+  round_off REAL NOT NULL DEFAULT 0,
+  total REAL NOT NULL DEFAULT 0,
+  payment_mode TEXT NOT NULL CHECK (payment_mode IN ('cash','upi','card','split','credit')),
+  cash_amount REAL NOT NULL DEFAULT 0,
+  upi_amount REAL NOT NULL DEFAULT 0,
+  card_amount REAL NOT NULL DEFAULT 0,
+  cash_received REAL NOT NULL DEFAULT 0,
+  change_returned REAL NOT NULL DEFAULT 0,
+  upi_ref TEXT,
+  status TEXT NOT NULL DEFAULT 'paid' CHECK (status IN ('paid','void','refunded')),
+  cashier_id INTEGER REFERENCES users(id),
+  cashier_name TEXT,
+  device_id TEXT,
+  client_uuid TEXT UNIQUE,
+  synced_from_offline INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  paid_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bill_id INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL,
+  amount REAL NOT NULL,
+  reference TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS customers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  phone TEXT UNIQUE,
+  gstin TEXT,
+  address TEXT,
+  loyalty_points INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS expenses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  expense_date TEXT NOT NULL,
+  category TEXT NOT NULL,
+  amount REAL NOT NULL,
+  note TEXT,
+  spent_by TEXT,
+  created_by INTEGER REFERENCES users(id),
+  client_uuid TEXT UNIQUE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id TEXT,
+  client_uuid TEXT,
+  entity TEXT NOT NULL,
+  status TEXT NOT NULL,
+  message TEXT,
+  payload TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id),
+  user_name TEXT,
+  action TEXT NOT NULL,
+  entity TEXT,
+  entity_id INTEGER,
+  detail TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
+CREATE INDEX IF NOT EXISTS idx_variants_product ON product_variants(product_id);
+CREATE INDEX IF NOT EXISTS idx_bills_date ON bills(bill_date);
+CREATE INDEX IF NOT EXISTS idx_bills_status ON bills(status);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_table ON orders(table_id);
+CREATE INDEX IF NOT EXISTS idx_stock_ledger_product ON stock_ledger(product_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
+`;
+
+db.exec(SCHEMA);
+
+export function getSetting(key, fallback = null) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : fallback;
+}
+
+export function setSetting(key, value) {
+  db.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(key, String(value), new Date().toISOString());
+}
+
+export function getSettings() {
+  const rows = db.prepare('SELECT key, value FROM settings').all();
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+
+export function audit(user, action, entity, entityId, detail) {
+  try {
+    db.prepare(
+      `INSERT INTO audit_logs (user_id, user_name, action, entity, entity_id, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      user?.id ?? null,
+      user?.name ?? 'system',
+      action,
+      entity ?? null,
+      entityId ?? null,
+      detail ? JSON.stringify(detail) : null,
+      new Date().toISOString(),
+    );
+  } catch {
+    // auditing must never break a sale
+  }
+}
+
+export function nextDocNo(prefix, table, dateColumn, date) {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${dateColumn} = ?`)
+    .get(date);
+  const seq = String((row?.c ?? 0) + 1).padStart(4, '0');
+  return `${prefix}-${date.replaceAll('-', '')}-${seq}`;
+}
+
+export { DB_PATH };
