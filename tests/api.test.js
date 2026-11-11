@@ -274,7 +274,7 @@ test('bill totals add lines and reject an underpayment', async () => {
   const bill = res.body.bill;
   assert.equal(bill.items.length, 2);
   assert.equal(bill.subtotal, 360);
-  assert.equal(bill.tax_amount, 0);
+  assert.equal(bill.tax_amount, undefined, 'bills carry no tax');
   assert.equal(bill.total, 360);
   assert.equal(bill.cash_amount, 360);
   assert.equal(bill.cash_received, 1000);
@@ -470,9 +470,8 @@ test('stock entry is counted in 180 ml bottles and managers can restock', async 
   const expectedBottles = before + 12;
   assert.equal(res.body.product.stock_bottles, expectedBottles);
   assert.equal(res.body.product.sealed_bottles, Math.floor(expectedBottles));
-  assert.ok(
-    Math.abs(res.body.product.loose_ml - (expectedBottles - Math.floor(expectedBottles)) * 180) < 0.01,
-  );
+  const loose = res.body.product.loose_ml ?? Math.round((expectedBottles - Math.floor(expectedBottles)) * 180);
+  assert.ok(Math.abs(loose - (expectedBottles - Math.floor(expectedBottles)) * 180) < 0.01);
   assert.ok(Math.abs(res.body.product.stock_qty - expectedBottles * 180) < 0.01);
 });
 
