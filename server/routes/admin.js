@@ -124,11 +124,11 @@ router.get('/suppliers', authenticate, manager, (req, res) => {
 });
 
 router.post('/suppliers', authenticate, manager, (req, res) => {
-  const { name, phone, gstin, address } = req.body || {};
+  const { name, phone, address } = req.body || {};
   if (!name) throw new HttpError(400, 'Supplier name is required');
   const result = db
-    .prepare('INSERT INTO suppliers (name, phone, gstin, address, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)')
-    .run(String(name).trim(), phone || null, gstin || null, address || null, nowISO());
+    .prepare('INSERT INTO suppliers (name, phone, address, is_active, created_at) VALUES (?, ?, ?, 1, ?)')
+    .run(String(name).trim(), phone || null, address || null, nowISO());
   res.status(201).json({ supplier: db.prepare('SELECT * FROM suppliers WHERE id = ?').get(result.lastInsertRowid) });
 });
 

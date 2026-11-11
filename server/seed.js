@@ -193,10 +193,10 @@ export function seedIfEmpty() {
   RESTAURANT_TABLES.forEach((t, i) => insertTable.run(t.label, t.zone, t.capacity, i, now));
 
   const insertSupplier = db.prepare(
-    `INSERT INTO suppliers (name, phone, gstin, address, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
+    `INSERT INTO suppliers (name, phone, address, is_active, created_at) VALUES (?, ?, ?, 1, ?)`,
   );
-  insertSupplier.run('Sagarika Beverages Distributors', '9876511111', '29AABCS1234D1Z2', 'Industrial Area, Mangaluru', now);
-  insertSupplier.run('Coastal Wines & Spirits', '9876522222', '29AABCC5678E1Z9', 'Port Road, Mangaluru', now);
+  insertSupplier.run('Sagarika Beverages Distributors', '9876511111', 'Industrial Area, Mangaluru', now);
+  insertSupplier.run('Coastal Wines & Spirits', '9876522222', 'Port Road, Mangaluru', now);
 
   db.prepare(
     `INSERT INTO expenses (expense_date, category, amount, note, spent_by, created_by, created_at)
