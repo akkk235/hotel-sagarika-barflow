@@ -17,7 +17,21 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
   const [supplier, setSupplier] = useState({ name: '', phone: '' });
   const [busy, setBusy] = useState(false);
   const [panel, setPanel] = useState(null);
+  const [dayStatus, setDayStatus] = useState(null);
   const queue = getQueue();
+
+  useEffect(() => {
+    if (!online) return undefined;
+    let alive = true;
+    api('/day/status')
+      .then((res) => {
+        if (alive) setDayStatus(res);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [online, tab === 'more']);
 
   useEffect(() => {
     setForm(settings);
@@ -154,6 +168,27 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
             Log out
           </button>
         </div>
+      </div>
+
+      <div className="card">
+        <div className="row between">
+          <strong className="small">Daily closing &amp; stock audit</strong>
+          <span className="badge">{dayStatus?.label || 'Not Opened'}</span>
+        </div>
+        {dayStatus?.cash ? (
+          <div className="tiny muted" style={{ marginTop: 4 }}>
+            Opening {Number(dayStatus.cash.opening_cash || 0).toLocaleString('en-IN')} · Expected{' '}
+            {Number(dayStatus.cash.expected_cash || 0).toLocaleString('en-IN')} · Sales{' '}
+            {Number(dayStatus.cash.total_sales || 0).toLocaleString('en-IN')}
+            {dayStatus.stock ? ` · Stock differences ${dayStatus.stock.discrepancies ?? 0}` : ''}
+          </div>
+        ) : null}
+        <p className="tiny muted">
+          Opening cash, cash/UPI reconciliation, physical stock counts, day closing and Owner-PIN reopen.
+        </p>
+        <button className="btn btn-primary btn-block" type="button" onClick={() => go && go('day')}>
+          🧾 Daily closing &amp; stock audit
+        </button>
       </div>
 
       {isManager ? (

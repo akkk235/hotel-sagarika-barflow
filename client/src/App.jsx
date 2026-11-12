@@ -17,6 +17,7 @@ import Billing from './pages/Billing.jsx';
 import Tables from './pages/Tables.jsx';
 import Products from './pages/Products.jsx';
 import Reports from './pages/Reports.jsx';
+import DayClosing from './pages/DayClosing.jsx';
 import More from './pages/More.jsx';
 
 const TABS = [
@@ -208,6 +209,9 @@ export default function App() {
         ) : null}
         {tab === 'reports' ? (
           <Reports data={data} notify={notify} online={online} user={user} refresh={refresh} />
+        ) : null}
+        {tab === 'day' ? (
+          <DayClosing user={user} notify={notify} online={online} />
         ) : null}
         {tab === 'more' ? (
           <More
