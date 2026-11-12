@@ -321,8 +321,8 @@ function reportPayload(name, { from, to }) {
       .prepare(
         `SELECT b.bill_no, b.created_at, b.upi_amount, b.upi_ref, b.total, u.name AS staff_name, t.name AS table_name
            FROM bills b
-           LEFT JOIN users u ON u.id = b.created_by
-           LEFT JOIN restaurant_tables t ON t.id = b.table_id
+           LEFT JOIN users u ON u.id = b.cashier_id
+           LEFT JOIN dining_tables t ON t.id = b.table_id
           WHERE b.bill_date = ? AND b.status = 'paid' AND b.deleted_at IS NULL AND b.upi_amount > 0
           ORDER BY b.created_at`,
       )

@@ -66,8 +66,8 @@ export function billsForDay(date) {
     .prepare(
       `SELECT b.*, u.name AS staff_name, t.name AS table_name
          FROM bills b
-         LEFT JOIN users u ON u.id = b.created_by
-         LEFT JOIN restaurant_tables t ON t.id = b.table_id
+         LEFT JOIN users u ON u.id = b.cashier_id
+         LEFT JOIN dining_tables t ON t.id = b.table_id
         WHERE b.bill_date = ? AND b.status = 'paid' AND b.deleted_at IS NULL
         ORDER BY b.created_at`,
     )
@@ -165,9 +165,9 @@ export function staffSalesForDay(date) {
               COALESCE(SUM(b.cash_amount), 0) AS cash,
               COALESCE(SUM(b.upi_amount), 0) AS upi
          FROM bills b
-         LEFT JOIN users u ON u.id = b.created_by
+         LEFT JOIN users u ON u.id = b.cashier_id
         WHERE b.bill_date = ? AND b.status = 'paid' AND b.deleted_at IS NULL
-        GROUP BY b.created_by
+        GROUP BY b.cashier_id
         ORDER BY total DESC`,
     )
     .all(date)
