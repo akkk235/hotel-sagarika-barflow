@@ -383,7 +383,7 @@ export default function DayClosing({ user, notify, online }) {
         <div className="card">
           <div className="grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
             <Tile label="Opening cash" value={inr(cash.opening_cash)} />
-            <Tile label="Expected cash" value={inr(cash.expected_cash)} />
+            <Tile label="Expected cash" value={status?.session ? inr(cash.expected_cash) : '—'} />
             <Tile label="Actual cash" value={cash.actual_cash == null ? '—' : inr(cash.actual_cash)} />
             <Tile
               label="Difference"
@@ -514,7 +514,7 @@ export default function DayClosing({ user, notify, online }) {
             <Row label="Other cash paid out" value={`-${inr(cash?.cash_paid_out)}`} />
             <Row label="Cash refunds" value={`-${inr(cash?.cash_refunds)}`} />
             <div style={{ borderTop: '1px dashed #cbd5e1', margin: '6px 0' }} />
-            <Row label="Expected closing cash" value={inr(cash?.expected_cash)} bold />
+            <Row label="Expected closing cash" value={status?.session ? inr(cash?.expected_cash) : '—'} bold />
             <Row label="Actual closing cash" value={cash?.actual_cash == null ? '—' : inr(cash.actual_cash)} />
             <Row
               label={cash?.cash_difference != null && cash.cash_difference < 0 ? 'Shortage' : 'Excess / difference'}
