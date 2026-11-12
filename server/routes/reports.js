@@ -308,7 +308,8 @@ router.post('/refunds', authenticate, ownerOnly, (req, res) => {
   const bill = db.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
   if (!bill) throw new HttpError(404, 'Bill not found');
   if (bill.deleted_at) throw new HttpError(400, 'This bill was deleted; it cannot be refunded');
-  if (!verifyOwnerPin(req.user, req.body?.pin)) throw new HttpError(403, 'Owner PIN is incorrect');
+  const pinCheck = verifyOwnerPin(req.user, req.body?.pin);
+  if (!pinCheck.ok) throw new HttpError(pinCheck.status || 403, pinCheck.message || 'Owner PIN is incorrect');
   const already = toNum(bill.refund_amount, 0);
   const amount = money(toNum(req.body?.amount, 0));
   if (amount <= 0) throw new HttpError(400, 'Refund amount must be greater than zero');
