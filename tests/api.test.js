@@ -1012,7 +1012,7 @@ test('reports: stock report closing balance equals the live bottle count', async
   const product = liquorProduct();
   const res = await getReport('stock', `from=${dayStr}&to=${dayStr}`, tokens.owner);
   assert.equal(res.status, 200, res.text);
-  const row = res.body.report.data.stock.find((r) => r.product_id === product.id);
+  const row = res.body.report.data.stock.find((r) => r.id === product.id);
   assert.ok(row, 'product appears in the stock report');
   const closing = pick(row, '^closing', 'closing_');
   assert.ok(closing !== undefined, 'stock row carries a closing balance');
