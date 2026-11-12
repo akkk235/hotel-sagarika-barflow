@@ -768,8 +768,9 @@ export function reportCancellations(f) {
   const refunds = db
     .prepare(
       `SELECT b.bill_no, b.bill_date, b.total AS original_amount, COALESCE(b.refund_amount,0) AS refund_amount,
-              b.refund_reason AS reason, b.refunded_by_name AS approved_by, b.refunded_at, b.cashier_name
-       FROM bills b WHERE b.bill_date BETWEEN ? AND ? AND (b.status='refunded' OR COALESCE(b.refund_amount,0) > 0)
+              b.refund_reason AS reason, COALESCE(u.name, b.cashier_name) AS approved_by, b.refunded_at, b.cashier_name
+       FROM bills b LEFT JOIN users u ON u.id = b.refunded_by
+       WHERE b.bill_date BETWEEN ? AND ? AND (b.status='refunded' OR COALESCE(b.refund_amount,0) > 0)
        ORDER BY b.refunded_at DESC`,
     )
     .all(f.from, f.to);
