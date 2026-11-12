@@ -1,469 +1,582 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { api } from '../api.js';
-import { buildReceiptHtml, printReceiptHtml } from '../receipt.js';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { api, getToken } from '../api.js';
 
 const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
+const shift = (days) => {
+  const d = new Date(`${todayStr()}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+};
 const monthStart = () => `${todayStr().slice(0, 7)}-01`;
+const prevMonth = () => {
+  const d = new Date(`${monthStart()}T00:00:00`);
+  d.setMonth(d.getMonth() - 1);
+  const from = d.toISOString().slice(0, 10);
+  const end = new Date(`${monthStart()}T00:00:00`);
+  end.setDate(0);
+  return { from, to: end.toISOString().slice(0, 10) };
+};
 
-export default function Reports({ data, notify, online, user, refresh }) {
-  const [date, setDate] = useState(todayStr());
+const RANGES = [
+  { id: 'today', label: 'Today', get: () => ({ from: todayStr(), to: todayStr() }) },
+  { id: 'yesterday', label: 'Yesterday', get: () => ({ from: shift(-1), to: shift(-1) }) },
+  { id: 'week', label: 'Last 7 days', get: () => ({ from: shift(-6), to: todayStr() }) },
+  { id: 'month', label: 'This month', get: () => ({ from: monthStart(), to: todayStr() }) },
+  { id: 'prev', label: 'Previous month', get: () => prevMonth() },
+];
+
+const ALL_TABS = [
+  { id: 'daily', label: 'Daily Sales', managerToday: true },
+  { id: 'trend', label: 'Date-wise', owner: true },
+  { id: 'compare', label: 'Compare', owner: true },
+  { id: 'product', label: 'Products', managerToday: true },
+  { id: 'liquor', label: 'Liquor', managerToday: true },
+  { id: 'stock', label: 'Stock', owner: true },
+  { id: 'purchases', label: 'Purchases' },
+  { id: 'payments', label: 'Payments', managerToday: true },
+  { id: 'tables', label: 'Tables', managerToday: true },
+  { id: 'staff', label: 'Staff', managerToday: true },
+  { id: 'cancellations', label: 'Cancellations', owner: true },
+  { id: 'closing', label: 'Closing', managerToday: true },
+  { id: 'pnl', label: 'Profit & Loss', owner: true },
+];
+
+const CACHE_PREFIX = 'barflow.report.';
+
+function cacheKey(name, filters) {
+  return `${CACHE_PREFIX}${name}:${JSON.stringify(filters)}`;
+}
+
+function readCache(name, filters) {
+  try {
+    const raw = localStorage.getItem(cacheKey(name, filters));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(name, filters, payload) {
+  try {
+    localStorage.setItem(cacheKey(name, filters), JSON.stringify({ ...payload, cached_at: new Date().toISOString() }));
+  } catch {
+    /* storage full — ignore */
+  }
+}
+
+export default function Reports({ notify, online, user }) {
   const isOwner = user?.role === 'owner';
-  const [deletions, setDeletions] = useState(null);
-  const [deleteTarget, setDeleteTarget] = useState(null);
-  const [pin, setPin] = useState('');
-  const [reason, setReason] = useState('');
-  const [deleting, setDeleting] = useState(false);
-  const [dash, setDash] = useState(null);
-  const [printingId, setPrintingId] = useState(null);
-  const [sales, setSales] = useState(null);
-  const [items, setItems] = useState(null);
-  const [stock, setStock] = useState(null);
-  const [expenses, setExpenses] = useState(null);
-  const [view, setView] = useState('today');
-  const [busy, setBusy] = useState(false);
-  const [expForm, setExpForm] = useState({ category: 'Purchase', amount: '', note: '' });
-  const canExpense = ['owner', 'manager'].includes(user?.role);
+  const isManager = user?.role === 'manager';
+  const tabs = useMemo(
+    () => ALL_TABS.filter((t) => (t.owner ? isOwner : true)),
+    [isOwner],
+  );
 
-  const loadDeletions = useCallback(async () => {
-    if (!online) return;
-    try {
-      setDeletions(await api('/bills/deleted'));
-    } catch {
-      setDeletions(null);
+  const [tab, setTab] = useState('daily');
+  const [rangeId, setRangeId] = useState('today');
+  const [from, setFrom] = useState(todayStr());
+  const [to, setTo] = useState(todayStr());
+  const [group, setGroup] = useState('day');
+  const [filters, setFilters] = useState({ staff_id: '', product_id: '', category_id: '', payment_mode: '' });
+  const [report, setReport] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [cachedAt, setCachedAt] = useState(null);
+  const [bill, setBill] = useState(null);
+  const [catalogue, setCatalogue] = useState({ products: [], categories: [], staff: [] });
+  const [compare, setCompare] = useState({
+    from_a: prevMonth().from,
+    to_a: prevMonth().to,
+    from_b: monthStart(),
+    to_b: todayStr(),
+  });
+  const [closing, setClosing] = useState({ opening_cash: '', closing_cash: '' });
+  const [expenses, setExpenses] = useState(null);
+  const [expForm, setExpForm] = useState({ category: 'Purchase', amount: '', note: '' });
+
+  // Managers may only look at today, so pin the range for them.
+  useEffect(() => {
+    if (isManager) {
+      setRangeId('today');
+      setFrom(todayStr());
+      setTo(todayStr());
     }
-  }, [online]);
+  }, [isManager]);
 
   useEffect(() => {
-    loadDeletions();
-  }, [loadDeletions]);
+    let alive = true;
+    (async () => {
+      try {
+        const res = await api('/products?include_inactive=0');
+        if (!alive) return;
+        const products = res.products || [];
+        const catMap = new Map();
+        for (const p of products) if (p.category_id) catMap.set(p.category_id, p.category_name || `Category ${p.category_id}`);
+        setCatalogue({ products, categories: [...catMap.entries()].map(([id, name]) => ({ id, name })) });
+      } catch {
+        /* filters still work without the catalogue */
+      }
+      try {
+        const res = await api('/reports/staff-options');
+        if (alive && Array.isArray(res.staff)) setCatalogue((c) => ({ ...c, staff: res.staff }));
+      } catch {
+        /* optional helper */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
-  /** Reprint an old bill on the 58 mm layout, clearly marked DUPLICATE. */
-  async function reprint(billId) {
-    try {
-      setPrintingId(billId);
-      const res = await api(`/bills/${billId}`);
-      const ok = printReceiptHtml(buildReceiptHtml(res.bill, data?.settings || {}, { duplicate: true }));
-      notify(
-        ok
-          ? 'Duplicate receipt sent to the print dialog'
-          : 'The browser blocked printing. Allow pop-ups for this site and try again.',
-        ok ? 'ok' : 'error',
-      );
-    } catch (err) {
-      notify(err.message, 'error');
-    } finally {
-      setPrintingId(null);
-    }
-  }
-
-  function closeDelete() {
-    setDeleteTarget(null);
-    setPin('');
-    setReason('');
-  }
-
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      await api(`/bills/${deleteTarget.id}`, {
-        method: 'DELETE',
-        body: { pin: pin.trim(), reason: reason.trim() || null },
-      });
-      notify(`Bill ${deleteTarget.bill_no} deleted`, 'ok');
-      closeDelete();
-      await loadDeletions();
-      if (refresh) await refresh();
-    } catch (err) {
-      notify(err.message, 'error');
-    } finally {
-      setDeleting(false);
-    }
-  }
+  const activeFilters = useMemo(
+    () => ({ from, to, ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== '')) }),
+    [from, to, filters],
+  );
 
   const load = useCallback(async () => {
-    if (!online) return;
     setBusy(true);
+    setError('');
     try {
-      const [d, s, i, st, ex] = await Promise.all([
-        api(`/reports/dashboard?date=${date}`),
-        api(`/reports/sales?from=${monthStart()}&to=${todayStr()}`),
-        api(`/reports/items?from=${monthStart()}&to=${todayStr()}`),
-        api('/reports/stock'),
-        api(`/reports/expenses?from=${monthStart()}&to=${todayStr()}`),
-      ]);
-      setDash(d);
-      setSales(s);
-      setItems(i);
-      setStock(st);
-      setExpenses(ex);
+      if (tab === 'compare') {
+        const res = await api(`/reports/compare?from_a=${compare.from_a}&to_a=${compare.to_a}&from_b=${compare.from_b}&to_b=${compare.to_b}`);
+        setReport(res.report);
+        setCachedAt(null);
+      } else {
+        const qs = new URLSearchParams(activeFilters);
+        if (tab === 'trend') qs.set('group', group);
+        const res = await api(`/reports/report/${tab}?${qs.toString()}`);
+        setReport(res.report);
+        setCachedAt(null);
+        writeCache(tab, activeFilters, res);
+      }
     } catch (err) {
-      notify(err.message, 'error');
+      const cached = readCache(tab, activeFilters);
+      if (cached?.report) {
+        setReport(cached.report);
+        setCachedAt(cached.cached_at);
+        setError(err.status === 0 ? 'Offline — showing the last saved snapshot for this period' : err.message);
+      } else {
+        setReport(null);
+        setError(err.message);
+      }
     } finally {
       setBusy(false);
     }
-  }, [date, notify, online]);
+  }, [tab, activeFilters, group, compare]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  async function addExpense() {
-    if (!expForm.amount) {
-      notify('Enter an amount', 'error');
-      return;
-    }
-    setBusy(true);
+  const loadExpenses = useCallback(async () => {
+    if (!isOwner) return;
     try {
-      await api('/reports/expenses', {
-        method: 'POST',
-        body: {
-          category: expForm.category,
-          amount: Number(expForm.amount),
-          note: expForm.note,
-          expense_date: date,
-        },
+      const res = await api(`/reports/expenses?from=${from}&to=${to}`);
+      setExpenses(res);
+    } catch {
+      setExpenses(null);
+    }
+  }, [from, to, isOwner]);
+
+  useEffect(() => {
+    loadExpenses();
+  }, [loadExpenses]);
+
+  const applyRange = (id) => {
+    const r = RANGES.find((x) => x.id === id);
+    if (!r) return;
+    const { from: f, to: t } = r.get();
+    setRangeId(id);
+    setFrom(f);
+    setTo(t);
+  };
+
+  const columns = report?.columns || [];
+  const rows = report?.rows || [];
+  const totals = report?.totals || {};
+
+  async function download(format) {
+    try {
+      const qs = new URLSearchParams({ report: tab, format });
+      if (tab === 'compare') {
+        Object.entries(compare).forEach(([k, v]) => qs.set(k, v));
+      } else {
+        Object.entries(activeFilters).forEach(([k, v]) => qs.set(k, v));
+        if (tab === 'trend') qs.set('group', group);
+      }
+      const res = await fetch(`/api/reports/export?${qs.toString()}`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
       });
-      setExpForm({ category: 'Purchase', amount: '', note: '' });
-      notify('Expense recorded', 'ok');
-      await load();
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hotel-sagarika-${tab}-${from}_${to}.${format === 'xlsx' ? 'xlsx' : 'pdf'}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      notify(`${format.toUpperCase()} downloaded`, 'ok');
     } catch (err) {
       notify(err.message, 'error');
-    } finally {
-      setBusy(false);
     }
   }
 
-  const summary = dash?.summary;
+  async function printReport() {
+    try {
+      const qs = new URLSearchParams({ report: tab, format: 'html' });
+      if (tab === 'compare') Object.entries(compare).forEach(([k, v]) => qs.set(k, v));
+      else {
+        Object.entries(activeFilters).forEach(([k, v]) => qs.set(k, v));
+        if (tab === 'trend') qs.set('group', group);
+      }
+      const res = await fetch(`/api/reports/export?${qs.toString()}`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (!res.ok) throw new Error(`Print failed (${res.status})`);
+      const html = await res.text();
+      const frame = document.createElement('iframe');
+      frame.style.position = 'fixed';
+      frame.style.right = '0';
+      frame.style.bottom = '0';
+      frame.style.width = '0';
+      frame.style.height = '0';
+      frame.style.border = '0';
+      document.body.appendChild(frame);
+      frame.contentDocument.open();
+      frame.contentDocument.write(html);
+      frame.contentDocument.close();
+      setTimeout(() => {
+        frame.contentWindow.focus();
+        frame.contentWindow.print();
+        setTimeout(() => frame.remove(), 60000);
+      }, 350);
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  }
+
+  async function openBill(row) {
+    const billNo = Array.isArray(row) ? row[0] : row?.bill_no;
+    if (!billNo) return;
+    try {
+      const res = await api(`/bills?search=${encodeURIComponent(billNo)}&limit=1`);
+      const found = (res.bills || [])[0];
+      if (!found) throw new Error('Bill not found');
+      setBill(await api(`/bills/${found.id}`));
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  }
+
+  async function saveClosing() {
+    try {
+      await api('/reports/cash-session', {
+        method: 'POST',
+        body: {
+          session_date: to,
+          opening_cash: closing.opening_cash === '' ? undefined : Number(closing.opening_cash),
+          closing_cash: closing.closing_cash === '' ? undefined : Number(closing.closing_cash),
+        },
+      });
+      notify('Cash declaration saved', 'ok');
+      load();
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  }
+
+  async function addExpense(e) {
+    e.preventDefault();
+    try {
+      await api('/reports/expenses', {
+        method: 'POST',
+        body: { expense_date: todayStr(), category: expForm.category, amount: Number(expForm.amount), note: expForm.note },
+      });
+      setExpForm({ category: 'Purchase', amount: '', note: '' });
+      notify('Expense recorded', 'ok');
+      loadExpenses();
+      load();
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  }
+
+  const billRows = report?.data?.bills || [];
 
   return (
-    <div>
-      <div className="row between" style={{ marginBottom: 10 }}>
-        <h2 style={{ margin: 0, fontSize: 19 }}>Reports</h2>
-        <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ maxWidth: 150 }} />
-      </div>
+    <div className="page reports-page">
+      <header className="page-head">
+        <div>
+          <h1>Reports</h1>
+          <p className="muted">
+            Hotel Sagarika · {from === to ? from : `${from} → ${to}`}
+            {cachedAt ? ' · offline snapshot' : ''}
+          </p>
+        </div>
+      </header>
 
-      <div className="chips">
-        {[
-          ['today', 'Day'],
-          ['items', 'Top items'],
-          ['stock', 'Stock'],
-          ['expenses', 'Expenses'],
-        ].map(([id, label]) => (
-          <button key={id} type="button" className={`chip ${view === id ? 'active' : ''}`} onClick={() => setView(id)}>
-            {label}
+      <div className="range-bar">
+        {RANGES.map((r) => (
+          <button
+            key={r.id}
+            type="button"
+            className={`chip ${rangeId === r.id ? 'active' : ''}`}
+            onClick={() => applyRange(r.id)}
+            disabled={isManager && r.id !== 'today'}
+          >
+            {r.label}
           </button>
         ))}
       </div>
 
-      {!online ? <div className="empty">Reports need a connection. Bills taken offline stay queued on this device.</div> : null}
+      <div className="filter-grid">
+        <label>
+          From
+          <input type="date" value={from} max={to} disabled={isManager} onChange={(e) => { setFrom(e.target.value); setRangeId('custom'); }} />
+        </label>
+        <label>
+          To
+          <input type="date" value={to} min={from} disabled={isManager} onChange={(e) => { setTo(e.target.value); setRangeId('custom'); }} />
+        </label>
+        <label>
+          Staff
+          <select value={filters.staff_id} onChange={(e) => setFilters({ ...filters, staff_id: e.target.value })}>
+            <option value="">All staff</option>
+            {(catalogue.staff || []).map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Category
+          <select value={filters.category_id} onChange={(e) => setFilters({ ...filters, category_id: e.target.value })}>
+            <option value="">All categories</option>
+            {catalogue.categories.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Product
+          <select value={filters.product_id} onChange={(e) => setFilters({ ...filters, product_id: e.target.value })}>
+            <option value="">All products</option>
+            {catalogue.products.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Payment
+          <select value={filters.payment_mode} onChange={(e) => setFilters({ ...filters, payment_mode: e.target.value })}>
+            <option value="">All methods</option>
+            <option value="cash">Cash</option>
+            <option value="upi">UPI</option>
+            <option value="split">Split</option>
+          </select>
+        </label>
+      </div>
 
-      {view === 'today' ? (
+      <div className="tab-strip">
+        {tabs.map((t) => (
+          <button key={t.id} type="button" className={`chip ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'compare' ? (
+        <div className="compare-grid">
+          <fieldset>
+            <legend>Period A</legend>
+            <input type="date" value={compare.from_a} onChange={(e) => setCompare({ ...compare, from_a: e.target.value })} />
+            <input type="date" value={compare.to_a} onChange={(e) => setCompare({ ...compare, to_a: e.target.value })} />
+          </fieldset>
+          <fieldset>
+            <legend>Period B</legend>
+            <input type="date" value={compare.from_b} onChange={(e) => setCompare({ ...compare, from_b: e.target.value })} />
+            <input type="date" value={compare.to_b} onChange={(e) => setCompare({ ...compare, to_b: e.target.value })} />
+          </fieldset>
+        </div>
+      ) : null}
+
+      {tab === 'trend' ? (
+        <div className="range-bar">
+          {['day', 'week', 'month'].map((g) => (
+            <button key={g} type="button" className={`chip ${group === g ? 'active' : ''}`} onClick={() => setGroup(g)}>
+              {g === 'day' ? 'Daily' : g === 'week' ? 'Weekly' : 'Monthly'}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="report-actions">
+        <button type="button" className="btn ghost" onClick={printReport} disabled={!report}>Print</button>
+        <button type="button" className="btn ghost" onClick={() => download('xlsx')} disabled={!report}>Excel (.xlsx)</button>
+        <button type="button" className="btn ghost" onClick={() => download('pdf')} disabled={!report}>PDF</button>
+        <button type="button" className="btn ghost" onClick={load} disabled={busy}>{busy ? 'Loading…' : 'Refresh'}</button>
+      </div>
+
+      {error ? <p className={`note ${cachedAt ? 'warn' : 'error'}`}>{error}</p> : null}
+
+      {report ? (
         <>
-          <div className="stat-grid">
-            <div className="stat">
-              <span className="k">Sales today</span>
-              <span className="v">{money(summary?.revenue)}</span>
-            </div>
-            <div className="stat">
-              <span className="k">Bills</span>
-              <span className="v">{summary?.bills ?? 0}</span>
-            </div>
-            <div className="stat">
-              <span className="k">Cash</span>
-              <span className="v" style={{ color: 'var(--green)' }}>
-                {money(summary?.cash)}
-              </span>
-            </div>
-            <div className="stat">
-              <span className="k">UPI</span>
-              <span className="v" style={{ color: 'var(--blue)' }}>
-                {money(summary?.upi)}
-              </span>
-            </div>
-            <div className="stat">
-              <span className="k">Pours sold</span>
-              <span className="v">{Math.round(summary?.pours ?? 0)}</span>
-            </div>
-            <div className="stat">
-              <span className="k">Low stock</span>
-              <span className="v" style={{ color: 'var(--amber)' }}>
-                {summary?.low_stock ?? 0}
-              </span>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="row between">
-              <strong className="small">Month to date</strong>
-              <span className="tiny muted">
-                {sales?.from} → {sales?.to}
-              </span>
-            </div>
-            <div className="row between" style={{ marginTop: 6 }}>
-              <span className="muted small">Revenue</span>
-              <strong>{money(sales?.totals?.revenue)}</strong>
-            </div>
-            <div className="row between">
-              <span className="muted small">Bills</span>
-              <span>{sales?.totals?.bills ?? 0}</span>
-            </div>
-          </div>
-
-          <div className="card">
-            <strong className="small">Recent bills</strong>
-            {(dash?.recent || []).length === 0 ? (
-              <p className="tiny muted">No bills on this date yet.</p>
-            ) : (
-              (dash?.recent || []).map((b) => (
-                <div className="row between" key={b.id} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
-                  <div>
-                    <div className="small">{b.bill_no}</div>
-                    <div className="tiny muted">
-                      {b.table_label} · {String(b.payment_mode).toUpperCase()} · {b.cashier_name}
-                    </div>
+          <section className="report-card">
+            <h2>{report.title}</h2>
+            {report.subtitle ? <p className="muted">{report.subtitle}</p> : null}
+            {Object.keys(totals).length ? (
+              <div className="stat-grid">
+                {Object.entries(totals).map(([k, v]) => (
+                  <div className="stat" key={k}>
+                    <span>{k.replace(/_/g, ' ')}</span>
+                    <strong>{typeof v === 'number' ? money(v) : String(v)}</strong>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <strong className="small">{money(b.total)}</strong>
-                    {!b.deleted_at ? (
-                      <button
-                        className="btn btn-sm"
-                        type="button"
-                        disabled={printingId === b.id}
-                        onClick={() => reprint(b.id)}
-                      >
-                        {printingId === b.id ? '…' : 'Print'}
-                      </button>
-                    ) : null}
-                    {isOwner && b.status === 'paid' && !b.deleted_at ? (
-                      <button className="btn btn-sm" type="button" onClick={() => setDeleteTarget(b)}>
-                        Delete
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-
-          <div className="card">
-            <div className="row between">
-              <strong className="small">Deleted bills</strong>
-              <span className="tiny muted">{deletions?.totals?.count ?? 0} record(s)</span>
-            </div>
-            <p className="tiny muted">
-              Deleted bills are kept for financial tracking and are not counted as active sales.
-            </p>
-            {(deletions?.deletions || []).length === 0 ? (
-              <p className="tiny muted">No bills have been deleted.</p>
-            ) : (
-              (deletions?.deletions || []).map((d) => (
-                <div key={d.id} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
-                  <div className="row between">
-                    <span className="small">{d.bill_no}</span>
-                    <strong className="small">{money(d.amount)}</strong>
-                  </div>
-                  <div className="tiny muted">
-                    Bill date {d.bill_date} · deleted by {d.deleted_by_name} on{' '}
-                    {String(d.deleted_at).replace('T', ' ').slice(0, 16)}
-                    {d.reason ? ` · ${d.reason}` : ''}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-
-          {deleteTarget ? (
-            <div className="sheet-backdrop" onClick={closeDelete}>
-              <div className="sheet" onClick={(e) => e.stopPropagation()}>
-                <div className="sheet-head">
-                  <h3>Delete bill?</h3>
-                  <button className="btn btn-sm" type="button" onClick={closeDelete}>
-                    ✕
-                  </button>
-                </div>
-                <div className="card" style={{ margin: 0 }}>
-                  <div className="row between">
-                    <span className="small">{deleteTarget.bill_no}</span>
-                    <strong>{money(deleteTarget.total)}</strong>
-                  </div>
-                  <p className="tiny muted">
-                    {deleteTarget.table_label} · {deleteTarget.bill_date} · Only the Owner can delete a bill.
-                  </p>
-                  <p className="tiny muted">
-                    The bill stops counting as a sale, stock is returned and a permanent record is kept.
-                  </p>
-                  <div className="field">
-                    <label htmlFor="ownerpin">Owner PIN</label>
-                    <input
-                      id="ownerpin"
-                      className="input"
-                      type="password"
-                      inputMode="numeric"
-                      autoComplete="off"
-                      value={pin}
-                      onChange={(e) => setPin(e.target.value)}
-                      placeholder="4–8 digit PIN"
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="delreason">Reason (optional)</label>
-                    <input
-                      id="delreason"
-                      className="input"
-                      value={reason}
-                      onChange={(e) => setReason(e.target.value)}
-                    />
-                  </div>
-                  <button
-                    className="btn btn-block"
-                    type="button"
-                    style={{ background: '#b3261e', color: '#fff' }}
-                    onClick={confirmDelete}
-                    disabled={deleting || pin.trim().length < 4}
-                  >
-                    {deleting ? 'Deleting…' : 'Confirm delete'}
-                  </button>
-                </div>
+                ))}
               </div>
+            ) : null}
+
+            <div className="table-wrap">
+              <table className="report-table">
+                <thead>
+                  <tr>{columns.map((c, i) => <th key={i}>{Array.isArray(c) ? c[0] : c}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {rows.length === 0 ? (
+                    <tr><td colSpan={Math.max(columns.length, 1)} className="muted">No records for this selection.</td></tr>
+                  ) : (
+                    rows.map((row, ri) => (
+                      <tr
+                        key={ri}
+                        className={tab === 'daily' && Array.isArray(row) ? 'clickable' : ''}
+                        onClick={tab === 'daily' && Array.isArray(row) ? () => openBill(row) : undefined}
+                      >
+                        {(Array.isArray(row) ? row : [row]).map((cell, ci) => <td key={ci}>{cell}</td>)}
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
+            {report.note ? <p className="note">{report.note}</p> : null}
+          </section>
+
+          {tab === 'daily' && billRows.length ? (
+            <section className="report-card">
+              <h2>Bills in this period</h2>
+              <div className="table-wrap">
+                <table className="report-table">
+                  <thead>
+                    <tr><th>Bill</th><th>Time</th><th>Table</th><th>Cashier</th><th>Method</th><th>Total</th></tr>
+                  </thead>
+                  <tbody>
+                    {billRows.map((b) => (
+                      <tr key={b.bill_no || b.id} className="clickable" onClick={() => openBill({ bill_no: b.bill_no })}>
+                        <td>{b.bill_no}</td>
+                        <td>{(b.bill_time || b.created_at || '').slice(11, 16) || b.bill_date}</td>
+                        <td>{b.table_label || '—'}</td>
+                        <td>{b.cashier_name || '—'}</td>
+                        <td>{b.payment_mode}</td>
+                        <td>{money(b.total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           ) : null}
 
-          <div className="card">
-            <strong className="small">Last 7 days</strong>
-            {(dash?.trend || []).map((t) => {
-              const max = Math.max(...(dash?.trend || []).map((x) => x.revenue), 1);
-              return (
-                <div key={t.date} style={{ marginTop: 6 }}>
-                  <div className="row between tiny muted">
-                    <span>{t.date}</span>
-                    <span>{money(t.revenue)}</span>
-                  </div>
-                  <div style={{ height: 6, background: 'var(--card-2)', borderRadius: 4 }}>
-                    <div
-                      style={{
-                        height: 6,
-                        width: `${Math.round((t.revenue / max) * 100)}%`,
-                        background: 'var(--amber)',
-                        borderRadius: 4,
-                      }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          {tab === 'closing' && ['owner', 'manager'].includes(user?.role) ? (
+            <section className="report-card">
+              <h2>Cash declaration</h2>
+              <div className="filter-grid">
+                <label>
+                  Opening cash
+                  <input type="number" inputMode="decimal" value={closing.opening_cash} onChange={(e) => setClosing({ ...closing, opening_cash: e.target.value })} />
+                </label>
+                <label>
+                  Closing cash
+                  <input type="number" inputMode="decimal" value={closing.closing_cash} onChange={(e) => setClosing({ ...closing, closing_cash: e.target.value })} />
+                </label>
+              </div>
+              <button type="button" className="btn" onClick={saveClosing}>Save for {to}</button>
+            </section>
+          ) : null}
         </>
       ) : null}
 
-      {view === 'items' ? (
-        <div className="card">
-          <strong className="small">Top selling pours (this month)</strong>
-          {(items?.items || []).length === 0 ? (
-            <p className="tiny muted">No sales yet this month.</p>
+      {isOwner && ['pnl', 'daily', 'stock'].includes(tab) ? (
+        <section className="report-card">
+          <h2>Operating expenses</h2>
+          <form className="filter-grid" onSubmit={addExpense}>
+            <label>
+              Category
+              <select value={expForm.category} onChange={(e) => setExpForm({ ...expForm, category: e.target.value })}>
+                {['Purchase', 'Salary', 'Rent', 'Electricity', 'Maintenance', 'Transport', 'Other'].map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Amount
+              <input type="number" inputMode="decimal" required value={expForm.amount} onChange={(e) => setExpForm({ ...expForm, amount: e.target.value })} />
+            </label>
+            <label>
+              Note
+              <input type="text" value={expForm.note} onChange={(e) => setExpForm({ ...expForm, note: e.target.value })} />
+            </label>
+            <button type="submit" className="btn">Add expense</button>
+          </form>
+          {expenses?.expenses?.length ? (
+            <div className="table-wrap">
+              <table className="report-table">
+                <thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Amount</th></tr></thead>
+                <tbody>
+                  {expenses.expenses.map((x) => (
+                    <tr key={x.id}><td>{x.expense_date}</td><td>{x.category}</td><td>{x.note || '—'}</td><td>{money(x.amount)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ) : (
-            (items?.items || []).map((it, idx) => (
-              <div className="row between" key={idx} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
-                <div>
-                  <div className="small">{it.product_name}</div>
-                  <div className="tiny muted">
-                    {it.variant_label} · {Math.round(it.qty)} sold
-                  </div>
-                </div>
-                <strong className="small">{money(it.amount)}</strong>
-              </div>
-            ))
+            <p className="muted">No expenses recorded for this period.</p>
           )}
+        </section>
+      ) : null}
+
+      {bill ? (
+        <div className="modal" onClick={() => setBill(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <header>
+              <h2>Bill {bill.bill?.bill_no || bill.bill_no}</h2>
+              <button type="button" className="icon" onClick={() => setBill(null)}>✕</button>
+            </header>
+            <p className="muted">
+              {(bill.bill?.bill_date || bill.bill_date)} · {bill.bill?.table_label || bill.bill?.table_label || '—'} ·{' '}
+              {bill.bill?.payment_mode || bill.bill?.payment_mode}
+            </p>
+            <div className="table-wrap">
+              <table className="report-table">
+                <thead><tr><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
+                <tbody>
+                  {(bill.items || []).map((it, i) => (
+                    <tr key={i}>
+                      <td>{it.product_name || it.name}{it.variant_label ? ` · ${it.variant_label}` : ''}</td>
+                      <td>{it.qty}</td>
+                      <td>{money(it.unit_price)}</td>
+                      <td>{money(it.line_total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="total-line">Total <strong>{money(bill.bill?.total ?? bill.total)}</strong></p>
+          </div>
         </div>
       ) : null}
 
-      {view === 'stock' ? (
-        <div className="card">
-          <div className="row between">
-            <strong className="small">Stock on hand</strong>
-            <span className="tiny muted">value {money(stock?.totals?.stock_value)}</span>
-          </div>
-          <p className="tiny muted">
-            {stock?.totals?.products ?? 0} products · {stock?.totals?.low ?? 0} low · {stock?.totals?.out ?? 0} out
-          </p>
-          {(stock?.stock || []).map((s) => (
-            <div className="row between" key={s.id} style={{ padding: '5px 0', borderBottom: '1px solid var(--line)' }}>
-              <div>
-                <div className="small">{s.name}</div>
-                <div className="tiny muted">{s.category_name || '—'}</div>
-              </div>
-              <span
-                className="small"
-                style={{ color: s.stock_qty <= 0 ? 'var(--red)' : s.stock_qty <= s.low_stock_qty ? 'var(--amber)' : 'var(--text)' }}
-              >
-                {Math.floor(s.stock_qty)} {s.unit_type === 'ml' ? 'ml' : 'u'}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {view === 'expenses' ? (
-        <div className="card">
-          <div className="row between">
-            <strong className="small">Expenses this month</strong>
-            <span className="small">{money(expenses?.total)}</span>
-          </div>
-          {(expenses?.expenses || []).map((e) => (
-            <div className="row between" key={e.id} style={{ padding: '5px 0', borderBottom: '1px solid var(--line)' }}>
-              <div>
-                <div className="small">{e.category}</div>
-                <div className="tiny muted">
-                  {e.expense_date} · {e.note || e.spent_by || ''}
-                </div>
-              </div>
-              <span className="small">{money(e.amount)}</span>
-            </div>
-          ))}
-          {canExpense ? (
-            <div style={{ marginTop: 10 }}>
-              <div className="grid-2">
-                <div className="field">
-                  <label htmlFor="ecat">Category</label>
-                  <select
-                    id="ecat"
-                    className="input"
-                    value={expForm.category}
-                    onChange={(e) => setExpForm({ ...expForm, category: e.target.value })}
-                  >
-                    {['Purchase', 'Salary', 'Rent', 'Electricity', 'Maintenance', 'Licence', 'Other'].map((c) => (
-                      <option key={c}>{c}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="eamt">Amount</label>
-                  <input
-                    id="eamt"
-                    className="input"
-                    type="number"
-                    value={expForm.amount}
-                    onChange={(e) => setExpForm({ ...expForm, amount: e.target.value })}
-                  />
-                </div>
-              </div>
-              <div className="field">
-                <label htmlFor="enote">Note</label>
-                <input
-                  id="enote"
-                  className="input"
-                  value={expForm.note}
-                  onChange={(e) => setExpForm({ ...expForm, note: e.target.value })}
-                />
-              </div>
-              <button className="btn btn-primary btn-block" type="button" onClick={addExpense} disabled={busy || !online}>
-                Add expense
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      {!online ? <p className="note warn">Offline — reports show the last snapshot saved on this device.</p> : null}
     </div>
   );
 }
