@@ -7,6 +7,41 @@ import { createBill, billWithItems, voidBill, deleteBill, dashboardSummary } fro
 const router = express.Router();
 const owner = requireRole('owner');
 
+/**
+ * Live bottle/unit balances for the products on a bill, so the till can show the
+ * updated stock immediately after payment without another request.
+ */
+function stockSnapshot(bill) {
+  let ids = [...new Set((bill?.items || []).map((i) => i.product_id).filter((id) => id != null))];
+  if (!ids.length) {
+    try {
+      ids = db
+        .prepare('SELECT DISTINCT product_id FROM bill_items WHERE bill_id = ?')
+        .all(bill.id)
+        .map((r) => r.product_id)
+        .filter((id) => id != null);
+    } catch {
+      ids = [];
+    }
+  }
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return db
+    .prepare(`SELECT id, name, unit_type, stock_qty, stock_bottles FROM products WHERE id IN (${placeholders})`)
+    .all(...ids)
+    .map((p) => {
+      const bottles = p.unit_type === 'ml' ? Math.round(Number(p.stock_bottles) * 10000) / 10000 : null;
+      return {
+        product_id: p.id,
+        name: p.name,
+        unit_type: p.unit_type,
+        stock_qty: p.stock_qty,
+        stock_bottles: bottles,
+        sealed_bottles: bottles === null ? null : Math.floor(bottles + 1e-9),
+      };
+    });
+}
+
 /** Create a paid bill directly (used by quick sale and by offline sync replay). */
 router.post('/', authenticate, (req, res) => {
   const payload = req.body || {};
@@ -16,7 +51,8 @@ router.post('/', authenticate, (req, res) => {
     deviceId: payload.device_id || req.headers['x-device-id'] || null,
     offline: Boolean(payload.offline),
   });
-  res.status(duplicate ? 200 : 201).json({ bill: billWithItems(bill.id), duplicate, warnings });
+  const saved = billWithItems(bill.id);
+  res.status(duplicate ? 200 : 201).json({ bill: saved, duplicate, warnings, stock: stockSnapshot(saved) });
 });
 
 router.get('/summary', authenticate, (req, res) => {

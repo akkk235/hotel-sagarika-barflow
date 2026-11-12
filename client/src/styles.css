@@ -843,3 +843,27 @@ textarea.input {
     grid-template-columns: repeat(6, 1fr);
   }
 }
+
+/* Browser print fallback (Ctrl/Cmd+P): 58 mm receipt, app chrome removed. */
+@media print {
+  @page {
+    size: 58mm auto;
+    margin: 0;
+  }
+  .topbar,
+  .bottom-nav,
+  .btn {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+    color: #000;
+  }
+  .receipt {
+    width: 58mm;
+    border-radius: 0;
+    padding: 2mm;
+    font-size: 10.5px;
+    background: #fff;
+  }
+}
