@@ -928,3 +928,222 @@ test('receipt: 58 mm layout carries every required line and no tax', () => {
   const duplicate = buildReceiptHtml(bill, {}, { duplicate: true });
   assert.match(duplicate, /DUPLICATE/, 'reprints are marked DUPLICATE');
 });
+
+/* ============================================================ REPORTS & ANALYTICS */
+const dayStr = new Date().toISOString().slice(0, 10);
+
+const getReport = (name, q, token) => call('GET', `/api/reports/report/${name}?${q}`, { token });
+
+/** First value in `obj` whose key matches any pattern (tolerant of naming). */
+function pick(obj, ...patterns) {
+  const key = Object.keys(obj || {}).find((k) => patterns.some((p) => new RegExp(p, 'i').test(k)));
+  return key ? obj[key] : undefined;
+}
+
+function activeBillsToday() {
+  return tdb
+    .prepare(
+      `SELECT COUNT(*) AS bills, COALESCE(SUM(total),0) AS sales,
+              COALESCE(SUM(cash_amount),0) AS cash, COALESCE(SUM(upi_amount),0) AS upi
+       FROM bills WHERE bill_date = ? AND deleted_at IS NULL AND status <> 'void'`,
+    )
+    .get(dayStr);
+}
+
+test('reports: daily sales totals match the recorded bills', async () => {
+  const expected = activeBillsToday();
+  const res = await getReport('daily', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(res.status, 200, res.text);
+  const t = res.body.report.totals;
+  assert.equal(t.bills, expected.bills);
+  assert.equal(Number(t.sales.toFixed(2)), Number(expected.sales.toFixed(2)));
+  assert.equal(Number(t.cash.toFixed(2)), Number(expected.cash.toFixed(2)));
+  assert.equal(Number(t.upi.toFixed(2)), Number(expected.upi.toFixed(2)));
+  assert.ok(t.items_sold >= 1);
+  assert.equal(
+    Number(t.net_collected.toFixed(2)),
+    Number((t.sales - t.refunds).toFixed(2)),
+    'net collected = sales - refunds',
+  );
+});
+
+test('reports: product-wise quantities and sales come from real order lines', async () => {
+  const res = await getReport('product', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(res.status, 200, res.text);
+  const products = res.body.report.data.products;
+  assert.ok(products.length > 0, 'at least one product sold today');
+
+  const lineQty = tdb
+    .prepare(
+      `SELECT COALESCE(SUM(oi.qty),0) AS q FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+       JOIN bills b ON b.order_id = o.id
+       WHERE b.bill_date = ? AND b.deleted_at IS NULL AND b.status <> 'void'`,
+    )
+    .get(dayStr).q;
+  const reportQty = products.reduce((s, p) => s + Number(p.qty), 0);
+  assert.equal(Number(reportQty.toFixed(2)), Number(lineQty.toFixed(2)));
+  assert.ok('cost' in products[0] && 'profit' in products[0], 'owner sees cost and profit');
+});
+
+test('reports: liquor consumption converts pours into 180 ml bottle equivalents', async () => {
+  const product = liquorProduct();
+  setBottles(product.id, 10);
+  const a = await sellLiquor(product, 90, 1, { uuid: `rep-90-${Date.now()}` });
+  const b = await sellLiquor(product, 180, 1, { uuid: `rep-180-${Date.now()}` });
+  assert.equal(a.status, 201, a.text);
+  assert.equal(b.status, 201, b.text);
+
+  const res = await getReport('liquor', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(res.status, 200, res.text);
+  const row = res.body.report.data.products.find((p) => p.product_id === product.id);
+  assert.ok(row, 'the brand appears in the liquor report');
+  assert.ok(Number(row.pours[90]) >= 1);
+  assert.ok(Number(row.pours[180]) >= 1);
+  assert.equal(
+    Number(row.bottles_consumed.toFixed(4)),
+    Number((row.total_ml / row.bottle_size_ml).toFixed(4)),
+    'bottles consumed = total ml / 180',
+  );
+  assert.ok(row.revenue > 0);
+});
+
+test('reports: stock report closing balance equals the live bottle count', async () => {
+  const product = liquorProduct();
+  const res = await getReport('stock', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(res.status, 200, res.text);
+  const row = res.body.report.data.stock.find((r) => r.product_id === product.id);
+  assert.ok(row, 'product appears in the stock report');
+  const closing = pick(row, '^closing', 'closing_');
+  assert.ok(closing !== undefined, 'stock row carries a closing balance');
+  assert.equal(Number(Number(closing).toFixed(4)), Number(stockBottlesOf(product.id).toFixed(4)));
+});
+
+test('reports: a liquor purchase adds sealed bottles and appears in the purchase report', async () => {
+  const product = liquorProduct();
+  const before = stockBottlesOf(product.id);
+  const res = await call('POST', '/api/admin/purchases', {
+    token: tokens.manager,
+    body: { invoice_no: `T-${Date.now()}`, items: [{ product_id: product.id, bottles: 6, unit_cost: 500 }] },
+  });
+  assert.ok([200, 201].includes(res.status), res.text);
+  assert.equal(
+    Number(stockBottlesOf(product.id).toFixed(4)),
+    Number((before + 6).toFixed(4)),
+    'purchased bottles land in the sealed bottle count',
+  );
+
+  const rep = await getReport('purchases', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(rep.status, 200, rep.text);
+  assert.ok(rep.body.report.rows.length >= 1, 'purchase appears in the report');
+});
+
+test('reports: staff are denied, managers are limited to today and never see cost', async () => {
+  const staff = await getReport('daily', `from=${dayStr}&to=${dayStr}`, tokens.staff);
+  assert.equal(staff.status, 403, 'staff have no management reports');
+
+  const oldRange = await getReport('daily', 'from=2020-01-01&to=2020-01-31', tokens.manager);
+  assert.equal(oldRange.status, 403, 'managers cannot read historical periods');
+
+  const today = await getReport('daily', `from=${dayStr}&to=${dayStr}`, tokens.manager);
+  assert.equal(today.status, 200, today.text);
+
+  const mgrProduct = await getReport('product', `from=${dayStr}&to=${dayStr}`, tokens.manager);
+  assert.equal(mgrProduct.status, 200, mgrProduct.text);
+  assert.ok(!mgrProduct.body.report.columns.includes('Cost'), 'manager never receives cost columns');
+
+  const mgrPnl = await getReport('pnl', `from=${dayStr}&to=${dayStr}`, tokens.manager);
+  assert.equal(mgrPnl.status, 403, 'profit and loss is Owner only');
+});
+
+test('reports: owner profit and loss separates COGS from purchase spend', async () => {
+  const res = await getReport('pnl', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(res.status, 200, res.text);
+  const t = res.body.report.totals;
+  const keys = Object.keys(t);
+  assert.ok(keys.some((k) => /sale/i.test(k)), 'reports total sales');
+  assert.ok(keys.some((k) => /cogs|cost_of_goods/i.test(k)), 'reports cost of goods sold');
+  assert.ok(keys.some((k) => /gross/i.test(k)), 'reports gross profit');
+  assert.ok(keys.some((k) => /purchase/i.test(k)), 'purchase spend is shown separately from COGS');
+});
+
+test('reports: refunds reduce net collections and deleted bills stay visible but inactive', async () => {
+  const product = liquorProduct();
+  const sold = await sellLiquor(product, 60, 1, { uuid: `ref-${Date.now()}`, mode: 'upi' });
+  assert.equal(sold.status, 201, sold.text);
+  const billId = sold.body.bill.id;
+
+  const wrongPin = await call('POST', '/api/reports/refunds', {
+    token: tokens.owner,
+    body: { bill_id: billId, amount: 10, pin: '9999' },
+  });
+  assert.equal(wrongPin.status, 403, 'refunds need the Owner PIN');
+
+  const asManager = await call('POST', '/api/reports/refunds', {
+    token: tokens.manager,
+    body: { bill_id: billId, amount: 10, pin: '4321' },
+  });
+  assert.equal(asManager.status, 403, 'managers cannot refund');
+
+  const refunded = await call('POST', '/api/reports/refunds', {
+    token: tokens.owner,
+    body: { bill_id: billId, amount: 10, pin: '4321', reason: 'spillage' },
+  });
+  assert.equal(refunded.status, 200, refunded.text);
+
+  const daily = await getReport('daily', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.ok(daily.body.report.totals.refunds >= 10, 'refund is reported separately');
+  assert.equal(
+    Number(daily.body.report.totals.net_collected.toFixed(2)),
+    Number((daily.body.report.totals.sales - daily.body.report.totals.refunds).toFixed(2)),
+  );
+
+  const canc = await getReport('cancellations', 'from=2000-01-01&to=2100-01-01', tokens.owner);
+  assert.equal(canc.status, 200, canc.text);
+  assert.ok(canc.body.report.data.deletions.length >= 1, 'deleted bills remain in the audit report');
+  assert.ok(canc.body.report.data.refunds.length >= 1, 'refund history is retained');
+});
+
+test('reports: Excel and PDF exports download real files, and staff cannot export', async () => {
+  for (const [format, magic, type] of [
+    ['xlsx', 'PK', 'spreadsheetml'],
+    ['pdf', '%PDF', 'pdf'],
+  ]) {
+    const res = await fetch(
+      `${base}/api/reports/export?report=daily&format=${format}&from=${dayStr}&to=${dayStr}`,
+      { headers: { Authorization: `Bearer ${tokens.owner}` } },
+    );
+    assert.equal(res.status, 200, `${format} export failed`);
+    assert.ok(res.headers.get('content-type').includes(type));
+    const buf = Buffer.from(await res.arrayBuffer());
+    assert.ok(buf.length > 500, `${format} has real content`);
+    assert.equal(buf.slice(0, magic.length).toString(), magic);
+  }
+
+  const denied = await fetch(
+    `${base}/api/reports/export?report=pnl&format=pdf&from=${dayStr}&to=${dayStr}`,
+    { headers: { Authorization: `Bearer ${tokens.staff}` } },
+  );
+  assert.equal(denied.status, 403, 'staff cannot export financial reports');
+});
+
+test('reports: daily closing statement combines sales, refunds and declared cash', async () => {
+  const saved = await call('POST', '/api/reports/cash-session', {
+    token: tokens.manager,
+    body: { session_date: dayStr, opening_cash: 2000, closing_cash: 5500 },
+  });
+  assert.equal(saved.status, 200, saved.text);
+
+  const res = await getReport('closing', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(res.status, 200, res.text);
+  const t = res.body.report.totals;
+  assert.equal(Number(pick(t, 'opening')), 2000);
+  assert.equal(Number(pick(t, 'closing')), 5500);
+
+  const daily = await getReport('daily', `from=${dayStr}&to=${dayStr}`, tokens.owner);
+  assert.equal(
+    Number(pick(t, 'cash', 'cash_sales').toFixed(2)),
+    Number(daily.body.report.totals.cash.toFixed(2)),
+    'closing cash sales agree with the daily report',
+  );
+});
