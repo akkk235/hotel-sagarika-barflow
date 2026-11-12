@@ -447,6 +447,126 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchases(purchase_dat
 db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_items_product ON purchase_items(product_id)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_refunds_bill ON refunds(bill_id)');
 
+/* ---------- Daily opening, cash closing & stock audit (additive only) ---------- */
+
+// One row per business day. The row is the day lock: status 'closed' means the
+// day's sales, stock counts and closing figures are frozen until the Owner
+// reopens it with the Owner PIN and a reason.
+db.exec(`
+CREATE TABLE IF NOT EXISTS day_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
+  opened_at TEXT NOT NULL,
+  opening_time TEXT,
+  opening_cash REAL NOT NULL DEFAULT 0,
+  opening_upi REAL NOT NULL DEFAULT 0,
+  opening_remarks TEXT,
+  opened_by INTEGER REFERENCES users(id),
+  opened_by_name TEXT,
+  expected_cash REAL,
+  actual_cash REAL,
+  cash_difference REAL,
+  upi_collected REAL,
+  total_sales REAL,
+  total_bills INTEGER,
+  closing_remarks TEXT,
+  closed_at TEXT,
+  closed_by INTEGER REFERENCES users(id),
+  closed_by_name TEXT,
+  locked INTEGER NOT NULL DEFAULT 0,
+  reopen_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);`);
+
+// Opening stock snapshot taken when the day is opened, so later stock movements
+// can never rewrite what the day started with. Liquor is counted in 180 ml
+// bottles, other products in units.
+db.exec(`
+CREATE TABLE IF NOT EXISTS day_stock_openings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  unit_type TEXT NOT NULL DEFAULT 'unit',
+  opening_qty REAL NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'carry_forward',
+  created_at TEXT NOT NULL,
+  UNIQUE (business_date, product_id)
+);`);
+
+// Physical count entered by the manager/owner, with the discrepancy and reason.
+db.exec(`
+CREATE TABLE IF NOT EXISTS day_stock_counts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  actual_qty REAL NOT NULL DEFAULT 0,
+  actual_loose_ml REAL NOT NULL DEFAULT 0,
+  expected_qty REAL NOT NULL DEFAULT 0,
+  difference_qty REAL NOT NULL DEFAULT 0,
+  reason TEXT,
+  counted_by INTEGER REFERENCES users(id),
+  counted_by_name TEXT,
+  counted_at TEXT NOT NULL,
+  UNIQUE (business_date, product_id)
+);`);
+
+// Authorised stock adjustments (Owner only) recorded against a business day.
+db.exec(`
+CREATE TABLE IF NOT EXISTS day_stock_adjustments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK (direction IN ('in','out')),
+  qty REAL NOT NULL,
+  loose_ml REAL NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(id),
+  created_by_name TEXT,
+  approved_by INTEGER REFERENCES users(id),
+  client_uuid TEXT UNIQUE,
+  created_at TEXT NOT NULL
+);`);
+
+// Cash received from other sources or paid out during the day. Client UUIDs make
+// offline replays idempotent, so a synced movement is never counted twice.
+db.exec(`
+CREATE TABLE IF NOT EXISTS cash_movements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('in','out')),
+  source TEXT NOT NULL DEFAULT 'other',
+  amount REAL NOT NULL,
+  note TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_by_name TEXT,
+  client_uuid TEXT UNIQUE,
+  created_at TEXT NOT NULL
+);`);
+
+// Every Owner-authorised reopen of a closed day, with the mandatory reason.
+db.exec(`
+CREATE TABLE IF NOT EXISTS day_reopens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  reopened_by INTEGER REFERENCES users(id),
+  reopened_by_name TEXT,
+  created_at TEXT NOT NULL
+);`);
+
+if (!hasColumn('refunds', 'refund_date')) {
+  db.exec('ALTER TABLE refunds ADD COLUMN refund_date TEXT');
+}
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_day_sessions_date ON day_sessions(business_date, status)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_day_openings_date ON day_stock_openings(business_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_day_counts_date ON day_stock_counts(business_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_day_adjustments_date ON day_stock_adjustments(business_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_cash_movements_date ON cash_movements(business_date, kind)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_refunds_date ON refunds(refund_date)');
+
 /** Round a bottle count to 4 decimals so 90 ml stays exactly 0.5 of a bottle. */
 export function roundBottles(value) {
   return Math.round((Number(value) || 0) * 10000) / 10000;
