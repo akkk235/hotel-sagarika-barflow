@@ -330,4 +330,12 @@ router.post('/refunds', authenticate, ownerOnly, (req, res) => {
   res.json({ bill: db.prepare('SELECT * FROM bills WHERE id = ?').get(billId) });
 });
 
+/** Staff list for the report filters (management only). */
+router.get('/staff-options', authenticate, manager, (req, res) => {
+  const staff = db
+    .prepare("SELECT id, name, role FROM users WHERE is_active = 1 ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, name")
+    .all();
+  res.json({ staff });
+});
+
 export default router;
