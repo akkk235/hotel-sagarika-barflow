@@ -163,17 +163,23 @@ router.post('/purchases', authenticate, manager, (req, res) => {
         `INSERT INTO purchase_items (purchase_id, product_id, bottles, ml_per_bottle, total_ml, unit_cost, amount)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(purchaseId, line.product.id, line.bottles, line.mlPerBottle, line.totalMl, line.unitCost, line.amount);
-      const next = money(line.product.stock_qty + line.totalMl);
-      db.prepare('UPDATE products SET stock_qty = ?, cost_price = ?, updated_at = ? WHERE id = ?').run(
-        next,
-        line.unitCost,
-        now,
-        line.product.id,
-      );
+      // Liquor is stocked in sealed 180 ml bottles; the ledger must stay in bottles so
+      // purchases, sales deductions and the stock report all reconcile.
+      const isLiquor = line.product.unit_type === 'ml';
+      const added = isLiquor
+        ? Math.round((line.bottles || 0) * 10000) / 10000
+        : Math.round((line.totalMl || 0) * 10000) / 10000;
+      const nextBottles = Math.round(((line.product.stock_bottles || 0) + added) * 10000) / 10000;
+      const nextQty = isLiquor
+        ? Math.round(nextBottles * (line.mlPerBottle || 180) * 100) / 100
+        : money(line.product.stock_qty + line.totalMl);
+      db.prepare(
+        'UPDATE products SET stock_qty = ?, stock_bottles = ?, cost_price = ?, updated_at = ? WHERE id = ?',
+      ).run(nextQty, nextBottles, line.unitCost, now, line.product.id);
       db.prepare(
         `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
          VALUES (?, ?, ?, 'purchase', 'purchase', ?, ?, ?, ?)`,
-      ).run(line.product.id, line.totalMl, next, purchaseId, `Purchase ${invoice_no || purchaseId}`, req.user.id, now);
+      ).run(line.product.id, added, nextBottles, purchaseId, `Purchase ${invoice_no || purchaseId}`, req.user.id, now);
     }
     return purchaseId;
   });
