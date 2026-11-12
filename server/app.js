@@ -67,11 +67,17 @@ export function createApp() {
   ]);
   for (const [route, meta] of PWA_FILES) {
     app.get(route, (req, res, next) => {
-      const target = path.join(DIST_DIR, meta.file);
-      if (!fs.existsSync(target)) return next();
+      // Read and send directly: res.sendFile applies Express's dotfile rules to
+      // the /.well-known path segment and rejects the file with an error.
+      let body;
+      try {
+        body = fs.readFileSync(path.join(DIST_DIR, meta.file));
+      } catch {
+        return next();
+      }
       res.setHeader('Content-Type', meta.type);
       res.setHeader('Cache-Control', meta.cache);
-      res.sendFile(target);
+      res.send(body);
     });
   }
 
