@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { api, enqueue, uuid } from '../api.js';
+import { buildReceiptHtml, printReceiptHtml } from '../receipt.js';
 
 const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -32,6 +33,7 @@ export default function Billing({ data, settings, user, online, notify, refresh,
   const [customerPhone, setCustomerPhone] = useState('');
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState(null);
+  const [printing, setPrinting] = useState(false);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -197,7 +199,7 @@ export default function Billing({ data, settings, user, online, notify, refresh,
             device_id: localStorage.getItem('barflow.device.v1') || 'web',
           },
         });
-        setReceipt(res.bill);
+        setReceipt({ ...res.bill, stock: res.stock || [] });
         setActiveTab(null);
         setSheet('receipt');
         resetAfterSale();
@@ -208,7 +210,7 @@ export default function Billing({ data, settings, user, online, notify, refresh,
       const payload = buildPayload();
       try {
         const res = await api('/bills', { method: 'POST', body: payload });
-        setReceipt(res.bill);
+        setReceipt({ ...res.bill, stock: res.stock || [] });
         if (res.warnings?.length) notify(res.warnings[0], 'error');
         setSheet('receipt');
         resetAfterSale();
@@ -228,9 +230,29 @@ export default function Billing({ data, settings, user, online, notify, refresh,
     }
   }
 
+  /**
+   * 58 mm receipt through the browser print dialog: works with a thermal printer
+   * driver or any normal printer, and never closes the bill screen.
+   */
+  function printReceipt(bill, duplicate) {
+    setPrinting(true);
+    let ok = false;
+    try {
+      ok = printReceiptHtml(buildReceiptHtml(bill, settings || {}, { duplicate }));
+    } finally {
+      setPrinting(false);
+    }
+    notify(
+      ok
+        ? 'Receipt sent to the print dialog — choose your 58 mm thermal printer'
+        : 'The browser blocked printing. Allow pop-ups for this site, then press PRINT RECEIPT again.',
+      ok ? 'ok' : 'error',
+    );
+    return ok;
+  }
+
   function resetAfterSale() {
     setCart([]);
-    setDiscount('');
     setCashReceived('');
     setUpiRef('');
     setCustomerName('');
@@ -645,14 +667,37 @@ export default function Billing({ data, settings, user, online, notify, refresh,
                 {settings.invoice_footer || 'Thank you, visit again!'}
               </div>
             </div>
+            {(receipt.stock || []).length ? (
+              <p className="tiny" style={{ color: 'var(--green)' }}>
+                Stock updated:{' '}
+                {(receipt.stock || [])
+                  .map((s) =>
+                    s.unit_type === 'ml'
+                      ? `${s.name} ${Number(s.stock_bottles).toFixed(2)} bottles (${s.sealed_bottles} sealed)`
+                      : `${s.name} ${s.stock_qty} left`,
+                  )
+                  .join(' · ')}
+              </p>
+            ) : null}
             {receipt.offline ? (
               <p className="tiny" style={{ color: 'var(--amber)' }}>
                 This bill is stored on this device and will be uploaded when the connection returns.
               </p>
             ) : null}
-            <button className="btn btn-primary btn-block" type="button" onClick={() => setSheet(null)}>
-              New bill
-            </button>
+            <div className="row" style={{ gap: 8 }}>
+              <button
+                className="btn btn-primary"
+                type="button"
+                style={{ flex: 1 }}
+                disabled={printing}
+                onClick={() => printReceipt(receipt, false)}
+              >
+                PRINT RECEIPT
+              </button>
+              <button className="btn" type="button" style={{ flex: 1 }} onClick={() => setSheet(null)}>
+                New bill
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
