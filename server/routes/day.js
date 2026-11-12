@@ -319,7 +319,7 @@ function reportPayload(name, { from, to }) {
   if (name === 'upi') {
     const bills = db
       .prepare(
-        `SELECT b.bill_no, b.created_at, b.upi_amount, b.upi_ref, b.total, u.name AS staff_name, t.name AS table_name
+        `SELECT b.bill_no, b.created_at, b.upi_amount, b.upi_ref, b.total, u.name AS staff_name, t.label AS table_name
            FROM bills b
            LEFT JOIN users u ON u.id = b.cashier_id
            LEFT JOIN dining_tables t ON t.id = b.table_id

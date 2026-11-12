@@ -64,7 +64,7 @@ function previousClosedSession(date) {
 export function billsForDay(date) {
   return db
     .prepare(
-      `SELECT b.*, u.name AS staff_name, t.name AS table_name
+      `SELECT b.*, u.name AS staff_name, t.label AS table_name
          FROM bills b
          LEFT JOIN users u ON u.id = b.cashier_id
          LEFT JOIN dining_tables t ON t.id = b.table_id
