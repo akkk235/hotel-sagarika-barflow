@@ -393,6 +393,60 @@ db.exec(
   "UPDATE products SET stock_qty = ROUND(stock_bottles * 180, 2) WHERE unit_type = 'ml'",
 );
 
+/* ---------- Reports & analytics upgrade (additive only, historic rows preserved) ---------- */
+
+// Refunds are recorded against the original bill; the bill itself is never erased.
+for (const column of [
+  ['refund_amount', 'REAL NOT NULL DEFAULT 0'],
+  ['refund_reason', 'TEXT'],
+  ['refunded_at', 'TEXT'],
+  ['refunded_by', 'INTEGER'],
+]) {
+  if (!hasColumn('bills', column[0])) {
+    db.exec(`ALTER TABLE bills ADD COLUMN ${column[0]} ${column[1]}`);
+  }
+}
+
+// Opening/closing cash declared by the manager or owner for each business day.
+db.exec(`
+CREATE TABLE IF NOT EXISTS cash_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_date TEXT NOT NULL UNIQUE,
+  opening_cash REAL NOT NULL DEFAULT 0,
+  closing_cash REAL,
+  note TEXT,
+  opened_by INTEGER REFERENCES users(id),
+  closed_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS refunds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bill_id INTEGER NOT NULL REFERENCES bills(id),
+  bill_no TEXT NOT NULL,
+  amount REAL NOT NULL,
+  reason TEXT,
+  approved_by INTEGER REFERENCES users(id),
+  performed_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL
+);`);
+
+// Date/aggregate indexes so report queries stay fast as history grows.
+db.exec('CREATE INDEX IF NOT EXISTS idx_bills_date_status ON bills(bill_date, status)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bills_staff ON bills(created_by, bill_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bills_table ON bills(table_id, bill_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bills_payment ON bills(payment_mode, bill_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_date ON orders(order_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_ledger_created ON stock_ledger(created_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_ledger_product ON stock_ledger(product_id, created_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchases(purchase_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_purchase_items_product ON purchase_items(product_id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_refunds_bill ON refunds(bill_id)');
+
 /** Round a bottle count to 4 decimals so 90 ml stays exactly 0.5 of a bottle. */
 export function roundBottles(value) {
   return Math.round((Number(value) || 0) * 10000) / 10000;
