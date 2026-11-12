@@ -435,7 +435,7 @@ CREATE TABLE IF NOT EXISTS refunds (
 
 // Date/aggregate indexes so report queries stay fast as history grows.
 db.exec('CREATE INDEX IF NOT EXISTS idx_bills_date_status ON bills(bill_date, status)');
-db.exec('CREATE INDEX IF NOT EXISTS idx_bills_staff ON bills(created_by, bill_date)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bills_staff ON bills(cashier_id, bill_date)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_bills_table ON bills(table_id, bill_date)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_bills_payment ON bills(payment_mode, bill_date)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_date ON orders(order_date)');
