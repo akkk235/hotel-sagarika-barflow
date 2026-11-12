@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, getToken } from '../api.js';
+import { buildReceiptHtml, printReceiptHtml } from '../receipt.js';
 
 const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -94,6 +95,10 @@ export default function Reports({ notify, online, user }) {
   const [closing, setClosing] = useState({ opening_cash: '', closing_cash: '' });
   const [expenses, setExpenses] = useState(null);
   const [expForm, setExpForm] = useState({ category: 'Purchase', amount: '', note: '' });
+  const [deletions, setDeletions] = useState([]);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [pin, setPin] = useState('');
+  const [reason, setReason] = useState('');
 
   // Managers may only look at today, so pin the range for them.
   useEffect(() => {
@@ -306,6 +311,45 @@ export default function Reports({ notify, online, user }) {
 
   const billRows = report?.data?.bills || [];
 
+  const loadDeletions = useCallback(async () => {
+    try {
+      const res = await api('/bills/deleted');
+      setDeletions(res.deletions || res.bills || []);
+    } catch {
+      setDeletions([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isOwner || isManager) loadDeletions();
+  }, [loadDeletions, isOwner, isManager]);
+
+  async function reprint(id) {
+    try {
+      const res = await api(`/bills/${id}`);
+      const printable = res.bill || res;
+      printReceiptHtml(buildReceiptHtml(printable, res.settings || {}, { duplicate: true }));
+      notify('Duplicate receipt sent to the print dialog', 'ok');
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    try {
+      await api(`/bills/${deleteTarget.id}`, { method: 'DELETE', body: { pin, reason } });
+      notify(`Bill ${deleteTarget.bill_no} deleted and logged`, 'ok');
+      setDeleteTarget(null);
+      setPin('');
+      setReason('');
+      load();
+      loadDeletions();
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  }
+
   return (
     <div className="page reports-page">
       <header className="page-head">
@@ -479,6 +523,20 @@ export default function Reports({ notify, online, user }) {
                         <td>{b.cashier_name || '—'}</td>
                         <td>{b.payment_mode}</td>
                         <td>{money(b.total)}</td>
+                        {isOwner ? (
+                          <td>
+                            <button
+                              type="button"
+                              className="link danger"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteTarget(b);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        ) : null}
                       </tr>
                     ))}
                   </tbody>
@@ -543,6 +601,58 @@ export default function Reports({ notify, online, user }) {
             <p className="muted">No expenses recorded for this period.</p>
           )}
         </section>
+      ) : null}
+
+      {tab === 'cancellations' && deletions.length ? (
+        <section className="report-card">
+          <h2>Deleted bills (retained for audit)</h2>
+          <div className="table-wrap">
+            <table className="report-table">
+              <thead><tr><th>Bill</th><th>Date</th><th>Amount</th><th>Deleted by</th><th>Reason</th><th>Reprint</th></tr></thead>
+              <tbody>
+                {deletions.map((d) => (
+                  <tr key={d.id || d.bill_no}>
+                    <td>{d.bill_no}</td>
+                    <td>{d.bill_date}</td>
+                    <td>{money(d.amount)}</td>
+                    <td>{d.deleted_by_name || '—'}</td>
+                    <td>{d.reason || '—'}</td>
+                    <td>
+                      <button type="button" className="link" onClick={() => reprint(d.bill_id || d.id)}>Duplicate</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="note">Deleted bills are excluded from active sales and never erased from the audit trail.</p>
+        </section>
+      ) : null}
+
+      {deleteTarget ? (
+        <div className="modal" onClick={() => setDeleteTarget(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <header>
+              <h2>Delete bill {deleteTarget.bill_no}</h2>
+              <button type="button" className="icon" onClick={() => setDeleteTarget(null)}>✕</button>
+            </header>
+            <p className="note warn">
+              This voids {money(deleteTarget.total)} and restores stock. The bill, its payment record and an audit entry are kept.
+            </p>
+            <label>
+              Owner PIN
+              <input type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} />
+            </label>
+            <label>
+              Reason
+              <input type="text" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is this bill deleted?" />
+            </label>
+            <div className="report-actions">
+              <button type="button" className="btn danger" onClick={confirmDelete} disabled={pin.length < 4}>Confirm deletion</button>
+              <button type="button" className="btn ghost" onClick={() => setDeleteTarget(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {bill ? (
