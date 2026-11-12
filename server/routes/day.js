@@ -56,7 +56,7 @@ function staffView(date, status) {
     opened: Boolean(status.session),
     opening_cash: status.session ? money(status.session.opening_cash) : null,
     closed: status.session?.status === 'closed',
-    stock: { products: status.stock.products, counted: status.stock.counted, pending: status.stock.pending },
+    stock_pending: status.stock.pending,
     permissions: { canOpen: false, canClose: false, canCount: false, canReopen: false, canAdjust: false },
   };
 }
