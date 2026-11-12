@@ -720,3 +720,200 @@ test('unknown API routes return a JSON 404', async () => {
   assert.equal(res.status, 404);
   assert.match(res.body.error, /Unknown API route/);
 });
+
+/* ------------------------------------------------------------------ */
+/* Urgent fixes: 58 mm receipt, bottle-fraction stock, live session    */
+/* ------------------------------------------------------------------ */
+
+const tdb = (await import('../server/db.js')).db;
+const { buildReceiptHtml } = await import('../client/src/receipt.js');
+
+function liquorProduct() {
+  return tdb.prepare("SELECT * FROM products WHERE unit_type = 'ml' ORDER BY id LIMIT 1").get();
+}
+
+function variantFor(productId, ml) {
+  return tdb.prepare('SELECT * FROM product_variants WHERE product_id = ? AND ml = ?').get(productId, ml);
+}
+
+function setBottles(productId, bottles) {
+  tdb.prepare('UPDATE products SET stock_bottles = ?, stock_qty = ? WHERE id = ?').run(
+    bottles,
+    Math.round(bottles * 180 * 100) / 100,
+    productId,
+  );
+}
+
+function bottlesOf(productId) {
+  return Number(tdb.prepare('SELECT stock_bottles FROM products WHERE id = ?').get(productId).stock_bottles);
+}
+
+function sellLiquor(product, ml, qty, opts = {}) {
+  const variant = variantFor(product.id, ml);
+  const amount = Number(variant.price) * qty;
+  const body = {
+    items: [{ product_id: product.id, variant_id: variant.id, qty }],
+    payment_mode: opts.mode || 'cash',
+    client_uuid: opts.uuid,
+  };
+  if ((opts.mode || 'cash') === 'upi') {
+    body.upi_amount = amount;
+    body.upi_ref = 'TESTUPIREF';
+  } else {
+    body.cash_received = amount;
+  }
+  return call('POST', '/api/bills', { token: opts.token || tokens.staff, body });
+}
+
+test('stock: a 90 ml pour deducts half a bottle (10 -> 9.5) and updates the ledger', async () => {
+  const product = liquorProduct();
+  setBottles(product.id, 10);
+
+  const res = await sellLiquor(product, 90, 1, { uuid: `stock-90-${Date.now()}` });
+  assert.equal(res.status, 201);
+  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 9.5);
+
+  const snapshot = (res.body.stock || []).find((s) => s.product_id === product.id);
+  assert.ok(snapshot, 'bill response carries the updated stock');
+  assert.equal(Number(Number(snapshot.stock_bottles).toFixed(4)), 9.5);
+  assert.equal(snapshot.sealed_bottles, 9);
+
+  const ledger = tdb
+    .prepare('SELECT * FROM stock_ledger WHERE product_id = ? ORDER BY id DESC LIMIT 1')
+    .get(product.id);
+  assert.equal(ledger.movement, 'sale');
+  assert.equal(Number(ledger.change_qty.toFixed(4)), -0.5);
+  assert.equal(Number(Number(ledger.balance_qty).toFixed(4)), 9.5);
+});
+
+test('stock: a sealed 180 ml bottle deducts one full bottle (9.5 -> 8.5)', async () => {
+  const product = liquorProduct();
+  setBottles(product.id, 10);
+  await sellLiquor(product, 90, 1, { uuid: `stock-seq-a-${Date.now()}` });
+
+  const res = await sellLiquor(product, 180, 1, { uuid: `stock-seq-b-${Date.now()}` });
+  assert.equal(res.status, 201);
+  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 8.5);
+});
+
+test('stock: every pour size deducts the documented fraction of a bottle', async () => {
+  const product = liquorProduct();
+  const cases = [
+    [30, 1 / 6],
+    [60, 1 / 3],
+    [90, 1 / 2],
+    [120, 2 / 3],
+    [150, 5 / 6],
+    [180, 1],
+  ];
+  for (const [ml, fraction] of cases) {
+    setBottles(product.id, 10);
+    const res = await sellLiquor(product, ml, 1, { uuid: `frac-${ml}-${Date.now()}` });
+    assert.equal(res.status, 201, `${ml} ml bill accepted`);
+    assert.equal(Number(bottlesOf(product.id).toFixed(4)), Number((10 - fraction).toFixed(4)), `${ml} ml`);
+  }
+});
+
+test('stock: the same payment never deducts twice (offline replay)', async () => {
+  const product = liquorProduct();
+  setBottles(product.id, 10);
+  const uuid = `idem-${Date.now()}`;
+
+  const first = await sellLiquor(product, 90, 1, { uuid });
+  assert.equal(first.status, 201);
+  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 9.5);
+
+  const replay = await sellLiquor(product, 90, 1, { uuid });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.duplicate, true);
+  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 9.5, 'replay must not deduct again');
+});
+
+test('stock: a rejected bill never deducts stock', async () => {
+  const product = liquorProduct();
+  setBottles(product.id, 1);
+  const res = await sellLiquor(product, 180, 5, { uuid: `reject-${Date.now()}` });
+  assert.ok(res.status >= 400, 'over-selling is refused');
+  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 1);
+});
+
+test('stock: soft drinks and snacks deduct unit quantity', async () => {
+  const product = tdb
+    .prepare("SELECT * FROM products WHERE unit_type != 'ml' ORDER BY id LIMIT 1")
+    .get();
+  assert.ok(product, 'a unit product is seeded');
+  tdb.prepare('UPDATE products SET stock_qty = 20 WHERE id = ?').run(product.id);
+
+  const res = await call('POST', '/api/bills', {
+    token: tokens.staff,
+    body: {
+      items: [{ product_id: product.id, qty: 2 }],
+      payment_mode: 'upi',
+      upi_amount: Number(product.price) * 2,
+      upi_ref: 'TESTUPIREF',
+      client_uuid: `unit-${Date.now()}`,
+    },
+  });
+  assert.equal(res.status, 201);
+  const after = tdb.prepare('SELECT stock_qty FROM products WHERE id = ?').get(product.id);
+  assert.equal(Number(after.stock_qty), 18);
+});
+
+test('session: the same token still works after completing a bill and keeps its role', async () => {
+  const product = liquorProduct();
+  setBottles(product.id, 10);
+
+  const res = await sellLiquor(product, 30, 1, { uuid: `sess-${Date.now()}` });
+  assert.equal(res.status, 201);
+
+  const me = await call('GET', '/api/auth/me', { token: tokens.staff });
+  assert.equal(me.status, 200, 'no re-login needed after billing');
+  assert.equal(me.body.user.username, 'staff');
+  assert.equal(me.body.user.role, 'staff');
+
+  const boot = await call('GET', '/api/bootstrap', { token: tokens.staff });
+  assert.equal(boot.status, 200);
+
+  const denied = await call('DELETE', `/api/bills/${res.body.bill.id}`, {
+    token: tokens.staff,
+    body: { pin: '4321' },
+  });
+  assert.equal(denied.status, 403, 'staff still cannot delete bills');
+});
+
+test('receipt: 58 mm layout carries every required line and no tax', () => {
+  const bill = {
+    bill_no: 'BILL-TEST-0001',
+    created_at: '2026-11-12T14:05:00.000Z',
+    table_label: 'T7',
+    cashier_name: 'Anil Waiter',
+    payment_mode: 'cash',
+    total: 210,
+    change_returned: 40,
+    items: [
+      {
+        product_name: 'Blenders Pride Reserve',
+        variant_label: '90 ml',
+        qty: 1,
+        unit_price: 210,
+        line_total: 210,
+      },
+    ],
+  };
+  const html = buildReceiptHtml(bill, { hotel_name: 'Hotel Sagarika', phone: '9999999999' });
+
+  assert.match(html, /58mm/, 'page is sized for a 58 mm printer');
+  assert.match(html, /Hotel Sagarika/);
+  assert.match(html, /BILL-TEST-0001/);
+  assert.match(html, /T7/);
+  assert.match(html, /Blenders Pride Reserve/);
+  assert.match(html, /90 ml/);
+  assert.match(html, /210\.00/);
+  assert.match(html, /CASH/);
+  assert.match(html, /Change/);
+  assert.doesNotMatch(html, /GST|CGST|SGST|IGST|tax/i);
+  assert.doesNotMatch(html, /DUPLICATE/);
+
+  const duplicate = buildReceiptHtml(bill, {}, { duplicate: true });
+  assert.match(duplicate, /DUPLICATE/, 'reprints are marked DUPLICATE');
+});
