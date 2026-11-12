@@ -744,7 +744,7 @@ function setBottles(productId, bottles) {
   );
 }
 
-function bottlesOf(productId) {
+function stockBottlesOf(productId) {
   return Number(tdb.prepare('SELECT stock_bottles FROM products WHERE id = ?').get(productId).stock_bottles);
 }
 
@@ -771,7 +771,7 @@ test('stock: a 90 ml pour deducts half a bottle (10 -> 9.5) and updates the ledg
 
   const res = await sellLiquor(product, 90, 1, { uuid: `stock-90-${Date.now()}` });
   assert.equal(res.status, 201);
-  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 9.5);
+  assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), 9.5);
 
   const snapshot = (res.body.stock || []).find((s) => s.product_id === product.id);
   assert.ok(snapshot, 'bill response carries the updated stock');
@@ -793,7 +793,7 @@ test('stock: a sealed 180 ml bottle deducts one full bottle (9.5 -> 8.5)', async
 
   const res = await sellLiquor(product, 180, 1, { uuid: `stock-seq-b-${Date.now()}` });
   assert.equal(res.status, 201);
-  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 8.5);
+  assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), 8.5);
 });
 
 test('stock: every pour size deducts the documented fraction of a bottle', async () => {
@@ -810,7 +810,7 @@ test('stock: every pour size deducts the documented fraction of a bottle', async
     setBottles(product.id, 10);
     const res = await sellLiquor(product, ml, 1, { uuid: `frac-${ml}-${Date.now()}` });
     assert.equal(res.status, 201, `${ml} ml bill accepted`);
-    assert.equal(Number(bottlesOf(product.id).toFixed(4)), Number((10 - fraction).toFixed(4)), `${ml} ml`);
+    assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), Number((10 - fraction).toFixed(4)), `${ml} ml`);
   }
 });
 
@@ -821,12 +821,12 @@ test('stock: the same payment never deducts twice (offline replay)', async () =>
 
   const first = await sellLiquor(product, 90, 1, { uuid });
   assert.equal(first.status, 201);
-  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 9.5);
+  assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), 9.5);
 
   const replay = await sellLiquor(product, 90, 1, { uuid });
   assert.equal(replay.status, 200);
   assert.equal(replay.body.duplicate, true);
-  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 9.5, 'replay must not deduct again');
+  assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), 9.5, 'replay must not deduct again');
 });
 
 test('stock: a rejected bill never deducts stock', async () => {
@@ -834,7 +834,7 @@ test('stock: a rejected bill never deducts stock', async () => {
   setBottles(product.id, 1);
   const res = await sellLiquor(product, 180, 5, { uuid: `reject-${Date.now()}` });
   assert.ok(res.status >= 400, 'over-selling is refused');
-  assert.equal(Number(bottlesOf(product.id).toFixed(4)), 1);
+  assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), 1);
 });
 
 test('stock: soft drinks and snacks deduct unit quantity', async () => {
