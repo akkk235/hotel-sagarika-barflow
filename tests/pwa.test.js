@@ -111,5 +111,5 @@ test('PWA: Android packaging documentation lists the asset links requirements', 
   assert.match(doc, /\.well-known\/assetlinks\.json/);
   assert.match(doc, /sha256_cert_fingerprints/);
   assert.match(doc, /com\.hotelsagarika\.barflow/);
-  assert.match(doc, /REPLACE/);
+  assert.match(doc, /Replace the placeholder values/);
 });
