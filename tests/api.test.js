@@ -831,10 +831,19 @@ test('stock: the same payment never deducts twice (offline replay)', async () =>
 
 test('stock: a rejected bill never deducts stock', async () => {
   const product = liquorProduct();
-  setBottles(product.id, 1);
-  const res = await sellLiquor(product, 180, 5, { uuid: `reject-${Date.now()}` });
-  assert.ok(res.status >= 400, 'over-selling is refused');
-  assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), 1);
+  setBottles(product.id, 10);
+
+  const res = await call('POST', '/api/bills', {
+    token: tokens.staff,
+    body: {
+      items: [{ product_id: 999999, qty: 1 }],
+      payment_mode: 'cash',
+      cash_received: 100,
+      client_uuid: `reject-${Date.now()}`,
+    },
+  });
+  assert.equal(res.status, 400, 'a bill with an unknown product is refused');
+  assert.equal(Number(stockBottlesOf(product.id).toFixed(4)), 10, 'failed bills must not move stock');
 });
 
 test('stock: soft drinks and snacks deduct unit quantity', async () => {
@@ -843,18 +852,20 @@ test('stock: soft drinks and snacks deduct unit quantity', async () => {
     .get();
   assert.ok(product, 'a unit product is seeded');
   tdb.prepare('UPDATE products SET stock_qty = 20 WHERE id = ?').run(product.id);
+  const variant = tdb
+    .prepare('SELECT id FROM product_variants WHERE product_id = ? ORDER BY id LIMIT 1')
+    .get(product.id);
 
   const res = await call('POST', '/api/bills', {
     token: tokens.staff,
     body: {
-      items: [{ product_id: product.id, qty: 2 }],
-      payment_mode: 'upi',
-      upi_amount: Number(product.price) * 2,
-      upi_ref: 'TESTUPIREF',
+      items: [{ product_id: product.id, ...(variant ? { variant_id: variant.id } : {}), qty: 2 }],
+      payment_mode: 'cash',
+      cash_received: 5000,
       client_uuid: `unit-${Date.now()}`,
     },
   });
-  assert.equal(res.status, 201);
+  assert.equal(res.status, 201, JSON.stringify(res.body));
   const after = tdb.prepare('SELECT stock_qty FROM products WHERE id = ?').get(product.id);
   assert.equal(Number(after.stock_qty), 18);
 });
