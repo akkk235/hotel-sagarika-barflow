@@ -618,15 +618,12 @@ export function addStockAdjustment({ user, date, product_id, direction, qty, loo
         product.id,
       );
       db.prepare(
-        `INSERT INTO stock_ledger (product_id, movement, change_qty, change_ml, balance_qty, balance_ml,
-                                   ref_type, ref_id, note, created_by, created_at)
-         VALUES (?, 'adjustment', ?, ?, ?, ?, 'day_adjustment', ?, ?, ?, ?)`,
+        `INSERT INTO stock_ledger (product_id, movement, change_qty, balance_qty, ref_type, ref_id, note, created_by, created_at)
+         VALUES (?, 'adjustment', ?, ?, 'day_adjustment', ?, ?, ?, ?)`,
       ).run(
         product.id,
         round4(deltaBottles),
-        round4(deltaBottles * bottleMl),
         nextBottles,
-        round4(nextBottles * bottleMl),
         info.lastInsertRowid,
         trimmedReason,
         user?.id ?? null,
@@ -636,9 +633,8 @@ export function addStockAdjustment({ user, date, product_id, direction, qty, loo
       const nextQty = round4(Number(product.stock_qty || 0) + deltaBottles);
       db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?').run(nextQty, now, product.id);
       db.prepare(
-        `INSERT INTO stock_ledger (product_id, movement, change_qty, change_ml, balance_qty, balance_ml,
-                                   ref_type, ref_id, note, created_by, created_at)
-         VALUES (?, 'adjustment', ?, 0, ?, 0, 'day_adjustment', ?, ?, ?, ?)`,
+        `INSERT INTO stock_ledger (product_id, movement, change_qty, balance_qty, ref_type, ref_id, note, created_by, created_at)
+         VALUES (?, 'adjustment', ?, ?, 'day_adjustment', ?, ?, ?, ?)`,
       ).run(product.id, round4(deltaBottles), nextQty, info.lastInsertRowid, trimmedReason, user?.id ?? null, now);
     }
     return { duplicate: false, id: info.lastInsertRowid };
