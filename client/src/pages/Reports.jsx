@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api.js';
+import { buildReceiptHtml, printReceiptHtml } from '../receipt.js';
 
 const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -14,6 +15,7 @@ export default function Reports({ data, notify, online, user, refresh }) {
   const [reason, setReason] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [dash, setDash] = useState(null);
+  const [printingId, setPrintingId] = useState(null);
   const [sales, setSales] = useState(null);
   const [items, setItems] = useState(null);
   const [stock, setStock] = useState(null);
@@ -35,6 +37,25 @@ export default function Reports({ data, notify, online, user, refresh }) {
   useEffect(() => {
     loadDeletions();
   }, [loadDeletions]);
+
+  /** Reprint an old bill on the 58 mm layout, clearly marked DUPLICATE. */
+  async function reprint(billId) {
+    try {
+      setPrintingId(billId);
+      const res = await api(`/bills/${billId}`);
+      const ok = printReceiptHtml(buildReceiptHtml(res.bill, data?.settings || {}, { duplicate: true }));
+      notify(
+        ok
+          ? 'Duplicate receipt sent to the print dialog'
+          : 'The browser blocked printing. Allow pop-ups for this site and try again.',
+        ok ? 'ok' : 'error',
+      );
+    } catch (err) {
+      notify(err.message, 'error');
+    } finally {
+      setPrintingId(null);
+    }
+  }
 
   function closeDelete() {
     setDeleteTarget(null);
@@ -205,6 +226,16 @@ export default function Reports({ data, notify, online, user, refresh }) {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <strong className="small">{money(b.total)}</strong>
+                    {!b.deleted_at ? (
+                      <button
+                        className="btn btn-sm"
+                        type="button"
+                        disabled={printingId === b.id}
+                        onClick={() => reprint(b.id)}
+                      >
+                        {printingId === b.id ? '…' : 'Print'}
+                      </button>
+                    ) : null}
                     {isOwner && b.status === 'paid' && !b.deleted_at ? (
                       <button className="btn btn-sm" type="button" onClick={() => setDeleteTarget(b)}>
                         Delete
