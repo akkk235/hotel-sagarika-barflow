@@ -31,7 +31,7 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
     return () => {
       alive = false;
     };
-  }, [online, tab === 'more']);
+  }, [online]);
 
   useEffect(() => {
     setForm(settings);
