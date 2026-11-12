@@ -38,6 +38,12 @@ const YESTERDAY = new Intl.DateTimeFormat('en-CA', {
 const tokens = {};
 const state = {};
 
+// Seed data ships sample expenses dated today. Clear today's day-book rows so the
+// cash scenario below matches the specification numbers exactly.
+db.prepare('DELETE FROM expenses').run();
+db.prepare('DELETE FROM refunds').run();
+db.prepare('DELETE FROM cash_movements').run();
+
 async function call(method, urlPath, { token, body } = {}) {
   const res = await fetch(base + urlPath, {
     method,
