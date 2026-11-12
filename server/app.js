@@ -55,6 +55,26 @@ export function createApp() {
     res.status(404).json({ error: `Unknown API route ${req.method} ${req.originalUrl}` });
   });
 
+  // PWA assets. The service worker must not be cached long (updates), and
+  // Express does not expose dot-directories such as /.well-known from static
+  // middleware, so Digital Asset Links is served explicitly for the TWA.
+  const PWA_FILES = new Map([
+    ['/sw.js', { file: 'sw.js', type: 'application/javascript; charset=utf-8', cache: 'no-cache' }],
+    [
+      '/.well-known/assetlinks.json',
+      { file: '.well-known/assetlinks.json', type: 'application/json; charset=utf-8', cache: 'no-store' },
+    ],
+  ]);
+  for (const [route, meta] of PWA_FILES) {
+    app.get(route, (req, res, next) => {
+      const target = path.join(DIST_DIR, meta.file);
+      if (!fs.existsSync(target)) return next();
+      res.setHeader('Content-Type', meta.type);
+      res.setHeader('Cache-Control', meta.cache);
+      res.sendFile(target);
+    });
+  }
+
   if (fs.existsSync(DIST_DIR)) {
     app.use(express.static(DIST_DIR, { index: false, maxAge: '1h' }));
     app.use((req, res, next) => {
