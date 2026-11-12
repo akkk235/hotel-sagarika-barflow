@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, getQueue } from '../api.js';
 
-export default function More({ data, user, online, notify, refresh, queueCount, sync, logout }) {
+export default function More({ data, user, online, notify, refresh, queueCount, sync, logout, go }) {
   const settings = data?.settings || {};
   const isManager = ['owner', 'manager'].includes(user?.role);
   const isOwner = user?.role === 'owner';
@@ -155,6 +155,19 @@ export default function More({ data, user, online, notify, refresh, queueCount, 
           </button>
         </div>
       </div>
+
+      {isManager ? (
+        <div className="card">
+          <strong className="small">Reports & analytics</strong>
+          <p className="tiny muted">
+            Daily sales, date-wise, product, liquor consumption, stock, purchase, payment, table, staff,
+            cancellation and closing reports — with Excel and PDF export.
+          </p>
+          <button className="btn btn-primary btn-block" type="button" onClick={() => go && go('reports')}>
+            📊 Reports & analytics
+          </button>
+        </div>
+      ) : null}
 
       <div className="card">
         <div className="row between">
