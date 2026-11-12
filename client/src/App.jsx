@@ -219,6 +219,7 @@ export default function App() {
             queueCount={queueCount}
             sync={() => sync(true)}
             logout={logout}
+            go={(id) => setTab(id)}
           />
         ) : null}
       </main>
