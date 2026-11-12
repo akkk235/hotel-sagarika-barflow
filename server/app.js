@@ -14,6 +14,7 @@ import syncRoutes from './routes/sync.js';
 import adminRoutes from './routes/admin.js';
 import lodgingRoutes from './routes/lodging.js';
 import dashboardRoutes from './routes/dashboard.js';
+import dayRoutes from './routes/day.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
@@ -46,6 +47,7 @@ export function createApp() {
   app.use('/api/orders', orderRoutes);
   app.use('/api/bills', billRoutes);
   app.use('/api/reports', reportRoutes);
+  app.use('/api/day', dayRoutes);
   app.use('/api/sync', syncRoutes);
   app.use('/api/admin', adminRoutes);
 
