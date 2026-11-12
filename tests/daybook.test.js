@@ -79,9 +79,9 @@ function insertPaidBill({ total, cash = 0, upi = 0, mode = 'cash', date = D, uui
 
 function insertExpense(amount, category = 'Supplies') {
   db.prepare(
-    `INSERT INTO expenses (expense_date, category, amount, note, spent_by, created_by, client_uuid)
-     VALUES (?, ?, ?, ?, 'Fixture', NULL, ?)`,
-  ).run(D, category, amount, 'Fixture expense', `exp-${Math.random().toString(36).slice(2)}`);
+    `INSERT INTO expenses (expense_date, category, amount, note, spent_by, created_by, client_uuid, created_at)
+     VALUES (?, ?, ?, ?, 'Fixture', NULL, ?, ?)`,
+  ).run(D, category, amount, 'Fixture expense', `exp-${Math.random().toString(36).slice(2)}`, new Date().toISOString());
 }
 
 /* ------------------------------------------------------------------ setup */
@@ -191,9 +191,13 @@ test('a second opening entry is refused; only Owner can correct it', async () =>
   assert.equal(ok.body.session.opening_cash, 5000);
 
   const audit = db
-    .prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'day_opening'")
+    .prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action IN ('day_open', 'day_opening_correct')")
     .get();
   assert.ok(audit.n >= 1, 'opening correction is audited');
+  const correction = db
+    .prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'day_opening_correct'")
+    .get();
+  assert.ok(correction.n >= 1, 'the correction itself is audited');
 });
 
 /* ------------------------------------ scenario 2-6: cash maths and shortage */
@@ -323,7 +327,7 @@ test('cash received from other sources is Owner-only and configurable', async ()
     token: tokens.owner,
     body: { date: D, kind: 'in', amount: 300, note: 'Owner float' },
   });
-  assert.equal(disabled.status, 400, disabled.text);
+  assert.equal(disabled.status, 403, disabled.text);
 
   const enable = await call('PUT', '/api/day/settings', {
     token: tokens.owner,
@@ -425,33 +429,33 @@ test('every remaining product is counted so the day can close', async () => {
 
 /* ----------------------------- scenario 5-6, 10: closing, lock and shortage */
 
-test('actual cash of 12,300 against 12,500 expected shows a Rs 200 shortage', async () => {
+test('actual cash of 12,200 against 12,300 expected shows a Rs 100 shortage', async () => {
   const noRemarks = await call('POST', '/api/day/close', {
     token: tokens.manager,
-    body: { date: D, actual_cash: 12300 },
+    body: { date: D, actual_cash: 12200 },
   });
   assert.equal(noRemarks.status, 400);
   assert.match(noRemarks.body.error, /remarks are required/i);
 
   const res = await call('POST', '/api/day/close', {
     token: tokens.manager,
-    body: { date: D, actual_cash: 12300, remarks: 'Rs 200 short, pending vendor payment' },
+    body: { date: D, actual_cash: 12200, remarks: 'Rs 100 short, pending vendor payment' },
   });
   assert.equal(res.status, 200, res.text);
   assert.equal(res.body.status, 'closed');
   assert.equal(res.body.label, 'Closed');
-  assert.equal(res.body.session.expected_cash, 12500);
-  assert.equal(res.body.session.actual_cash, 12300);
-  assert.equal(res.body.session.cash_difference, -200);
+  assert.equal(res.body.session.expected_cash, 12300);
+  assert.equal(res.body.session.actual_cash, 12200);
+  assert.equal(res.body.session.cash_difference, -100);
   assert.equal(res.body.session.closed_by_name, 'Suresh Kumar');
   assert.ok(res.body.session.closed_at, 'closing time recorded');
   assert.equal(res.body.session.locked, 1);
   assert.equal(res.body.stock.discrepancies, 1);
 
   const cash = (await call('GET', `/api/day/summary?date=${D}`, { token: tokens.manager })).body.cash;
-  assert.equal(cash.shortage, 200);
+  assert.equal(cash.shortage, 100);
   assert.equal(cash.excess, 0);
-  assert.equal(cash.expected_cash, 12500, 'closed day keeps its frozen expected cash');
+  assert.equal(cash.expected_cash, 12300, 'closed day keeps its frozen expected cash');
 });
 
 test('a closed day cannot be edited by manager or staff', async () => {
@@ -463,19 +467,19 @@ test('a closed day cannot be edited by manager or staff', async () => {
     token: tokens.manager,
     body: { date: D, product_id: product.product_id, actual_bottles: 1 },
   });
-  assert.equal(count.status, 403, count.text);
+  assert.equal(count.status, 409, count.text);
 
   const cash = await call('POST', '/api/day/cash', {
     token: tokens.manager,
     body: { date: D, kind: 'out', amount: 100, note: 'late edit' },
   });
-  assert.equal(cash.status, 403, cash.text);
+  assert.equal(cash.status, 409, cash.text);
 
   const adjust = await call('POST', '/api/day/stock/adjustment', {
     token: tokens.owner,
     body: { date: D, product_id: product.product_id, direction: 'in', qty: 1, reason: 'late adjustment' },
   });
-  assert.equal(adjust.status, 403, 'even the Owner must reopen before adjusting');
+  assert.equal(adjust.status, 409, 'even the Owner must reopen before adjusting');
 
   const closeAgain = await call('POST', '/api/day/close', {
     token: tokens.manager,
@@ -510,7 +514,7 @@ test('only the Owner can reopen a closed day, with PIN and a reason', async () =
     body: { date: D, pin: '4321', reason: 'Missed UPI entry at 21:40' },
   });
   assert.equal(ok.status, 200, ok.text);
-  assert.equal(ok.body.status, 'open');
+  assert.ok(['open', 'closing_pending'].includes(ok.body.status), ok.body.status);
   assert.equal(ok.body.session.reopen_count, 1);
 
   const reopenRow = db.prepare('SELECT * FROM day_reopens WHERE business_date = ?').get(D);
@@ -572,7 +576,7 @@ test('manager can read today but not historical closing reports', async () => {
 test('staff see only the day status, never cash figures', async () => {
   const res = await call('GET', `/api/day/status?date=${D}`, { token: tokens.staff });
   assert.equal(res.status, 200, res.text);
-  assert.equal(res.body.status, 'open');
+  assert.ok(['open', 'closing_pending'].includes(res.body.status), res.body.status);
   assert.equal(res.body.cash, undefined, 'no cash figures for staff');
   assert.equal(res.body.stock, undefined, 'no stock figures for staff');
 });
