@@ -181,6 +181,76 @@ function migrateBeerSizes() {
   return changed > 0;
 }
 
+/**
+ * Idempotent repair for beer catalogue rows. Older data can hold a product-level variant
+ * (ml = 0) or two rows for the same bottle size, which splits one size's stock across rows
+ * and leaves the product reading "Out of stock". Duplicate rows are merged into the row that
+ * holds the stock; the surplus row is deactivated, never deleted, so ledger and bill history
+ * still point at a real row.
+ */
+function repairBeerVariants() {
+  const now = new Date().toISOString();
+  const products = db.prepare("SELECT * FROM products WHERE stock_mode = 'variant'").all();
+  let changed = 0;
+  for (const product of products) {
+    let variants = db
+      .prepare('SELECT * FROM product_variants WHERE product_id = ? ORDER BY sort_order, ml')
+      .all(product.id);
+    const legacy = variants.find((v) => !Number(v.ml));
+    if (legacy && !variants.some((v) => Number(v.ml) === 650)) {
+      db.prepare('UPDATE product_variants SET ml = 650, label = ?, consume_qty = 1 WHERE id = ?').run(
+        beerSizeLabel(650),
+        legacy.id,
+      );
+      variants = db
+        .prepare('SELECT * FROM product_variants WHERE product_id = ? ORDER BY sort_order, ml')
+        .all(product.id);
+      changed += 1;
+    }
+    const bySize = new Map();
+    for (const v of variants) {
+      const size = Number(v.ml);
+      if (!size) continue;
+      if (!bySize.has(size)) bySize.set(size, []);
+      bySize.get(size).push(v);
+    }
+    for (const [size, rows] of bySize) {
+      if (rows.length < 2) continue;
+      const keeper =
+        rows.find((r) => Number(r.is_default)) || rows.find((r) => Number(r.stock_qty) > 0) || rows[0];
+      const stock = rows.reduce((sum, r) => sum + (Number(r.stock_qty) || 0), 0);
+      const priced = rows.find((r) => Number(r.price) > 0);
+      const price = Number(keeper.price) || Number(priced?.price) || 0;
+      db.prepare(
+        'UPDATE product_variants SET stock_qty = ?, price = ?, label = ?, is_active = 1, is_default = 1 WHERE id = ?',
+      ).run(round4(stock), price, beerSizeLabel(size), keeper.id);
+      for (const row of rows) {
+        if (row.id === keeper.id) continue;
+        db.prepare('UPDATE product_variants SET is_active = 0, stock_qty = 0, is_default = 0 WHERE id = ?').run(
+          row.id,
+        );
+      }
+      changed += 1;
+    }
+    const total = db
+      .prepare('SELECT COALESCE(SUM(stock_qty), 0) AS total FROM product_variants WHERE product_id = ? AND is_active = 1')
+      .get(product.id).total;
+    if (
+      Math.abs(Number(product.stock_qty) - Number(total)) > 1e-9 ||
+      Math.abs(Number(product.stock_bottles) - Number(total)) > 1e-9
+    ) {
+      db.prepare('UPDATE products SET stock_qty = ?, stock_bottles = ?, updated_at = ? WHERE id = ?').run(
+        round4(total),
+        round4(total),
+        now,
+        product.id,
+      );
+      changed += 1;
+    }
+  }
+  return changed;
+}
+
 /** Run once at boot, after seeding, before routes serve requests. */
 export function migrateCatalog() {
   const wanted = [
