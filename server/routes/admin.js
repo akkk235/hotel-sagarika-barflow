@@ -1,6 +1,6 @@
 import express from 'express';
 import { db, audit, getSettings, setSetting } from '../db.js';
-import { authenticate, manager, hashPassword, hashPin, verifyOwnerPin, requireRole } from '../auth.js';
+import { authenticate, manager, hashPassword, hashPin, verifyOwnerPin, requireRole, requirePermission } from '../auth.js';
 import { HttpError, money, nowISO, toNum } from '../util.js';
 
 const router = express.Router();
@@ -133,7 +133,7 @@ router.post('/suppliers', authenticate, manager, (req, res) => {
 });
 
 /** Stock inward: adds bottles to stock and writes the ledger. */
-router.post('/purchases', authenticate, manager, (req, res) => {
+router.post('/purchases', authenticate, requirePermission('stock_add'), (req, res) => {
   const { supplier_id, invoice_no, items, notes } = req.body || {};
   if (!Array.isArray(items) || items.length === 0) throw new HttpError(400, 'Add at least one purchase line');
   const now = nowISO();
