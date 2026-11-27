@@ -33,6 +33,7 @@ const ALL_TABS = [
   { id: 'compare', label: 'Compare', owner: true },
   { id: 'product', label: 'Products', managerToday: true },
   { id: 'liquor', label: 'Liquor', managerToday: true },
+  { id: 'beer', label: 'Beer', managerToday: true },
   { id: 'stock', label: 'Stock', owner: true },
   { id: 'purchases', label: 'Purchases' },
   { id: 'payments', label: 'Payments', managerToday: true },

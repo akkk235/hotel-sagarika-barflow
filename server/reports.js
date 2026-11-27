@@ -394,6 +394,149 @@ export function reportLiquor(f) {
   };
 }
 
+/* ------------------------------------------------------------------ E. BEER */
+/**
+ * Beer is sold as whole bottles of one specific size. Every size is its own SKU
+ * with its own price and stock, so beer is reported separately from liquor
+ * (which is measured in ml pours of a 180 ml bottle).
+ *
+ * Stock maths comes from the stock ledger (opening = closing - movements in range)
+ * and revenue from bill lines, so purchases, sales and closing stock reconcile.
+ * Cost and gross profit are only included for the Owner.
+ */
+export function reportBeer(f, { includeCost = false } = {}) {
+  const w = salesWhere(f);
+  const sizes = db
+    .prepare(
+      `SELECT v.id AS variant_id, v.label, v.ml, v.stock_qty, v.cost_price,
+              p.id AS product_id, p.name, p.low_stock_qty, COALESCE(c.name,'Beer') AS category,
+              s.name AS supplier
+       FROM product_variants v
+       JOIN products p ON p.id = v.product_id
+       LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN suppliers s ON s.id = v.supplier_id
+       WHERE p.stock_mode = 'variant' AND p.is_active = 1 AND v.is_active = 1
+         ${f.product_id ? 'AND p.id = @product_id' : ''} ${f.category_id ? 'AND p.category_id = @category_id' : ''}
+       ORDER BY p.name, v.ml DESC`,
+    )
+    .all(f);
+
+  const sold = new Map();
+  for (const row of db
+    .prepare(
+      `SELECT oi.variant_id, SUM(oi.qty) AS qty, SUM(oi.line_total) AS revenue
+       FROM order_items oi JOIN bills b ON b.order_id = oi.order_id
+       WHERE ${w.sql} AND oi.variant_id IS NOT NULL
+       GROUP BY oi.variant_id`,
+    )
+    .all(w.params)) {
+    sold.set(Number(row.variant_id), row);
+  }
+
+  const purchased = new Map();
+  for (const row of db
+    .prepare(
+      `SELECT pi.variant_id, SUM(pi.bottles) AS bottles, SUM(pi.amount) AS amount
+       FROM purchase_items pi JOIN purchases pu ON pu.id = pi.purchase_id
+       WHERE pi.variant_id IS NOT NULL AND pu.purchase_date BETWEEN ? AND ?
+       GROUP BY pi.variant_id`,
+    )
+    .all(f.from, f.to)) {
+    purchased.set(Number(row.variant_id), row);
+  }
+
+  // opening = closing - every stock movement recorded inside the range.
+  const moved = new Map();
+  for (const row of db
+    .prepare(
+      `SELECT variant_id, SUM(change_qty) AS qty FROM stock_ledger
+       WHERE variant_id IS NOT NULL AND substr(created_at,1,10) BETWEEN ? AND ?
+       GROUP BY variant_id`,
+    )
+    .all(f.from, f.to)) {
+    moved.set(Number(row.variant_id), n(row.qty));
+  }
+
+  const products = sizes.map((s) => {
+    const sSold = sold.get(Number(s.variant_id)) || { qty: 0, revenue: 0 };
+    const sPurch = purchased.get(Number(s.variant_id)) || { bottles: 0, amount: 0 };
+    const closing = r2(s.stock_qty);
+    const opening = r2(closing - (moved.get(Number(s.variant_id)) || 0));
+    const unitCost = n(s.cost_price);
+    const cost = r2(unitCost * n(sSold.qty));
+    return {
+      product_id: s.product_id,
+      name: s.name,
+      category: s.category,
+      variant_id: s.variant_id,
+      size: s.label,
+      ml: n(s.ml),
+      supplier: s.supplier || '—',
+      opening,
+      purchased: r2(sPurch.bottles),
+      sold: r2(sSold.qty),
+      closing,
+      purchase_value: money0(sPurch.amount),
+      sales_value: money0(sSold.revenue),
+      unit_cost: unitCost,
+      cost_of_goods: cost,
+      gross_profit: money0(n(sSold.revenue) - cost),
+      cost_missing: !unitCost,
+      low_stock: closing <= n(s.low_stock_qty),
+    };
+  });
+
+  const totals = products.reduce(
+    (a, p) => ({
+      opening: r2(a.opening + p.opening),
+      purchased: r2(a.purchased + p.purchased),
+      sold: r2(a.sold + p.sold),
+      closing: r2(a.closing + p.closing),
+      purchase_value: money0(a.purchase_value + p.purchase_value),
+      sales_value: money0(a.sales_value + p.sales_value),
+      cost_of_goods: r2(a.cost_of_goods + p.cost_of_goods),
+      gross_profit: money0(a.gross_profit + p.gross_profit),
+    }),
+    { opening: 0, purchased: 0, sold: 0, closing: 0, purchase_value: 0, sales_value: 0, cost_of_goods: 0, gross_profit: 0 },
+  );
+
+  const columns = [
+    'Product',
+    'Bottle size',
+    'Supplier',
+    'Opening',
+    'Purchased',
+    'Sold',
+    'Closing',
+    'Purchase value',
+    'Sales value',
+    ...(includeCost ? ['Cost of goods', 'Gross profit'] : []),
+  ];
+  const rows = products.map((p) => [
+    p.name,
+    p.size,
+    p.supplier,
+    p.opening,
+    p.purchased,
+    p.sold,
+    p.closing,
+    p.purchase_value,
+    p.sales_value,
+    ...(includeCost ? [p.cost_of_goods, p.gross_profit] : []),
+  ]);
+
+  return {
+    title: 'Beer Report (by bottle size)',
+    columns,
+    rows,
+    totals,
+    note:
+      'Each beer bottle size is an independent product with its own price and stock. ' +
+      'Opening = closing minus all stock movements in the selected range. Stock is counted in bottles.',
+    data: { products, totals, include_cost: includeCost },
+  };
+}
+
 /* --------------------------------------------------------------- E. STOCK */
 function stockMovements(whereSql, params, key = 'in') {
   return db.prepare(whereSql).all(params);
@@ -1014,6 +1157,7 @@ export const REPORT_DEFS = {
   compare: { title: 'Period Comparison', managerToday: false },
   product: { title: 'Product-wise Sales', managerToday: true },
   liquor: { title: 'Liquor Consumption', managerToday: true },
+  beer: { title: 'Beer Report', managerToday: true },
   stock: { title: 'Stock Report', managerToday: false, ownerOnly: true },
   purchases: { title: 'Purchase Report', managerToday: false },
   payments: { title: 'Payment Report', managerToday: true },
@@ -1051,6 +1195,8 @@ export function buildReport(name, f, user) {
       return reportProduct(f, { includeCost: user.role === 'owner' });
     case 'liquor':
       return reportLiquor(f);
+    case 'beer':
+      return reportBeer(f, { includeCost: user.role === 'owner' });
     case 'stock':
       return reportStock(f);
     case 'purchases':
