@@ -1,6 +1,7 @@
 import express from 'express';
+import crypto from 'node:crypto';
 import { db, audit, getSettings, bottleStock, roundBottles } from '../db.js';
-import { authenticate, manager } from '../auth.js';
+import { authenticate, manager, requirePermission } from '../auth.js';
 import { HttpError, money, nowISO, toNum } from '../util.js';
 import { roomList, roomSummary } from '../lodging.js';
 import {
@@ -83,7 +84,7 @@ router.get('/categories', authenticate, (req, res) => {
   res.json({ categories: rows });
 });
 
-router.post('/categories', authenticate, manager, (req, res) => {
+router.post('/categories', authenticate, requirePermission('products_manage'), (req, res) => {
   const { name, description, color } = req.body || {};
   if (!name || !String(name).trim()) throw new HttpError(400, 'Category name is required');
   const now = nowISO();
@@ -103,7 +104,7 @@ router.post('/categories', authenticate, manager, (req, res) => {
   }
 });
 
-router.put('/categories/:id', authenticate, manager, (req, res) => {
+router.put('/categories/:id', authenticate, requirePermission('products_manage'), (req, res) => {
   const id = Number(req.params.id);
   const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
   if (!existing) throw new HttpError(404, 'Category not found');
@@ -123,7 +124,7 @@ router.put('/categories/:id', authenticate, manager, (req, res) => {
   res.json({ category: db.prepare('SELECT * FROM categories WHERE id = ?').get(id) });
 });
 
-router.delete('/categories/:id', authenticate, manager, (req, res) => {
+router.delete('/categories/:id', authenticate, requirePermission('products_manage'), (req, res) => {
   const id = Number(req.params.id);
   db.prepare('UPDATE categories SET is_active = 0, updated_at = ? WHERE id = ?').run(nowISO(), id);
   audit(req.user, 'category.delete', 'category', id, null);
@@ -206,7 +207,7 @@ function syncVariantStock(productId, { movement = null, user = null, now = nowIS
   return rounded;
 }
 
-router.post('/products', authenticate, manager, (req, res) => {
+router.post('/products', authenticate, requirePermission('products_manage'), (req, res) => {
   const body = req.body || {};
   if (!body.name || !String(body.name).trim()) throw new HttpError(400, 'Product name is required');
   const unitType = body.unit_type === 'unit' ? 'unit' : 'ml';
@@ -286,7 +287,7 @@ router.post('/products', authenticate, manager, (req, res) => {
   res.status(201).json({ product: productsWithVariants({ includeInactive: true }).find((p) => p.id === id) });
 });
 
-router.put('/products/:id', authenticate, manager, (req, res) => {
+router.put('/products/:id', authenticate, requirePermission('products_manage'), (req, res) => {
   const id = Number(req.params.id);
   const existing = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   if (!existing) throw new HttpError(404, 'Product not found');
@@ -378,7 +379,7 @@ router.put('/products/:id', authenticate, manager, (req, res) => {
   res.json({ product: productsWithVariants({ includeInactive: true }).find((p) => p.id === id) });
 });
 
-router.delete('/products/:id', authenticate, manager, (req, res) => {
+router.delete('/products/:id', authenticate, requirePermission('products_manage'), (req, res) => {
   const id = Number(req.params.id);
   db.prepare('UPDATE products SET is_active = 0, updated_at = ? WHERE id = ?').run(nowISO(), id);
   audit(req.user, 'product.delete', 'product', id, null);
@@ -386,7 +387,7 @@ router.delete('/products/:id', authenticate, manager, (req, res) => {
 });
 
 // ---------- Stock ----------
-router.post('/products/:id/stock', authenticate, manager, (req, res) => {
+router.post('/products/:id/stock', authenticate, requirePermission('stock_add', 'stock_edit'), (req, res) => {
   const id = Number(req.params.id);
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   if (!product) throw new HttpError(404, 'Product not found');
@@ -410,8 +411,8 @@ router.post('/products/:id/stock', authenticate, manager, (req, res) => {
       db.prepare('UPDATE product_variants SET stock_qty = ? WHERE id = ?').run(nextSize, variant.id);
       syncVariantStock(id, { now });
       db.prepare(
-        `INSERT INTO stock_ledger (product_id, variant_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?)`,
+        `INSERT INTO stock_ledger (product_id, variant_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at, txn_id)
+         VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?)`,
       ).run(
         id,
         variant.id,
@@ -421,6 +422,7 @@ router.post('/products/:id/stock', authenticate, manager, (req, res) => {
         body.note || `${variant.label} stock entry`,
         req.user.id,
         now,
+        crypto.randomUUID(),
       );
     })();
     audit(req.user, 'stock.adjust', 'product', id, { change, movement, variant_id: variant.id, balance: nextSize });
@@ -438,9 +440,9 @@ router.post('/products/:id/stock', authenticate, manager, (req, res) => {
         id,
       );
       db.prepare(
-        `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at)
-         VALUES (?, ?, ?, ?, 'manual', ?, ?, ?)`,
-      ).run(id, change, nextBottles, movement, body.note || 'Bottle stock entry', req.user.id, now);
+        `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at, txn_id)
+         VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?)`,
+      ).run(id, change, nextBottles, movement, body.note || 'Bottle stock entry', req.user.id, now, crypto.randomUUID());
     })();
     audit(req.user, 'stock.adjust', 'product', id, { change_bottles: change, movement, balance: nextBottles });
     const updated = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
@@ -452,9 +454,9 @@ router.post('/products/:id/stock', authenticate, manager, (req, res) => {
   db.transaction(() => {
     db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?').run(next, now, id);
     db.prepare(
-      `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at)
-       VALUES (?, ?, ?, ?, 'manual', ?, ?, ?)`,
-    ).run(id, change, next, movement, body.note || null, req.user.id, now);
+      `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, note, created_by, created_at, txn_id)
+       VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?)`,
+    ).run(id, change, next, movement, body.note || null, req.user.id, now, crypto.randomUUID());
   })();
   audit(req.user, 'stock.adjust', 'product', id, { change, movement, balance: next });
   res.json({ product: db.prepare('SELECT * FROM products WHERE id = ?').get(id) });
