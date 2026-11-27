@@ -75,7 +75,7 @@ test('owner, manager and staff can log in', async () => {
 
 /* ------------------------------------------------------- 1. LIQUOR PRICING */
 
-test('liquor serving prices derive from the 180 ml bottle price and round up to ₹5', async () => {
+test('liquor serving prices derive from the 180 ml bottle price, add ₹5 and round up to ₹5', async () => {
   const res = await call('POST', '/api/products', {
     token: tokens.owner,
     body: {
@@ -91,12 +91,12 @@ test('liquor serving prices derive from the 180 ml bottle price and round up to 
   state.liquor = product;
 
   const byMl = new Map(product.variants.map((v) => [Number(v.ml), Number(v.price)]));
-  // (440 / 180) × ml, rounded UP to the next multiple of ₹5. 90 ml is already 220 and must not grow.
-  assert.equal(byMl.get(30), 75);
-  assert.equal(byMl.get(60), 150);
-  assert.equal(byMl.get(90), 220);
-  assert.equal(byMl.get(120), 295);
-  assert.equal(byMl.get(150), 370);
+  // (440 / 180) × ml + ₹5, rounded UP to the next multiple of ₹5. The full 180 ml bottle stays ₹440.
+  assert.equal(byMl.get(30), 80);
+  assert.equal(byMl.get(60), 155);
+  assert.equal(byMl.get(90), 225);
+  assert.equal(byMl.get(120), 300);
+  assert.equal(byMl.get(150), 375);
   assert.equal(byMl.get(180), 440);
   assert.equal(Number(product.bottle_price), 440);
   assert.equal(product.stock_bottles, 10);
@@ -109,12 +109,12 @@ test('liquor pricing rule holds for a second bottle price (₹375)', async () =>
   });
   assert.equal(res.status, 201, res.text);
   const byMl = new Map(res.body.product.variants.map((v) => [Number(v.ml), Number(v.price)]));
-  // 375/180 = 2.0833 per ml → 62.5→65, 125→125 (exact multiple), 187.5→190, 250→250, 312.5→315, 375
-  assert.equal(byMl.get(30), 65);
-  assert.equal(byMl.get(60), 125);
-  assert.equal(byMl.get(90), 190);
-  assert.equal(byMl.get(120), 250);
-  assert.equal(byMl.get(150), 315);
+  // 375/180 = 2.0833 per ml → 62.5+5=67.5→70, 125+5=130→130, 187.5+5=192.5→195, 250+5=255, 312.5+5=317.5→320, 375
+  assert.equal(byMl.get(30), 70);
+  assert.equal(byMl.get(60), 130);
+  assert.equal(byMl.get(90), 195);
+  assert.equal(byMl.get(120), 255);
+  assert.equal(byMl.get(150), 320);
   assert.equal(byMl.get(180), 375);
 });
 
@@ -126,8 +126,8 @@ test('editing the bottle price re-derives pours without touching stock', async (
   });
   assert.equal(res.status, 200, res.text);
   const byMl = new Map(res.body.product.variants.map((v) => [Number(v.ml), Number(v.price)]));
-  assert.equal(byMl.get(30), 90); // 540/6 = 90 exactly
-  assert.equal(byMl.get(90), 270);
+  assert.equal(byMl.get(30), 95); // 540/6 = 90, + ₹5 = 95
+  assert.equal(byMl.get(90), 275);
   assert.equal(byMl.get(180), 540);
   assert.equal(bottlesOf(state.liquor.id), before, 'price edits must not change stock');
 
@@ -144,11 +144,11 @@ test('a paid 90 ml liquor sale deducts exactly half a bottle', async () => {
       client_uuid: uuid(),
       items: [{ product_id: state.liquor.id, variant_id: pour90.id, qty: 1 }],
       payment_mode: 'cash',
-      cash_received: 220,
+      cash_received: 225,
     },
   });
   assert.equal(res.status, 201, res.text);
-  assert.equal(res.body.bill.total, 220);
+  assert.equal(res.body.bill.total, 225);
   assert.equal(bottlesOf(state.liquor.id), Number((before - 0.5).toFixed(4)));
 });
 

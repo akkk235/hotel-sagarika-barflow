@@ -165,8 +165,8 @@ test('liquor is stocked in sealed 180 ml bottles with six serve sizes', async ()
   const prices = liquor.variants.map((v) => v.price);
   assert.ok(prices.every((p) => p > 0));
   assert.ok(prices[5] > prices[0]);
-  assert.equal(liquor.variants[0].price, 70);
-  assert.equal(liquor.variants[2].price, 210);
+  assert.equal(liquor.variants[0].price, 75);
+  assert.equal(liquor.variants[2].price, 215);
 
   const beer = res.body.products.find((p) => p.unit_type === 'unit' && /Kingfisher/.test(p.name));
   assert.ok(beer, 'expected a unit product');
@@ -187,7 +187,7 @@ test('cash bill deducts the correct bottle fraction (2 x 30 ml = 60 ml)', async 
   });
   assert.equal(res.status, 201, res.text);
   assert.equal(res.body.bill.status, 'paid');
-  assert.equal(res.body.bill.total, 140);
+  assert.equal(res.body.bill.total, 150);
   const after = bottlesOf(state.liquor.id);
   const consumedMl = (before - after) * 180;
   assert.ok(Math.abs(consumedMl - 60) < 0.05, `expected 60 ml deducted, got ${consumedMl}`);
@@ -246,12 +246,12 @@ test('a 90 ml serve leaves 9.5 bottles from 10', async () => {
     body: {
       items: [{ product_id: product.id, variant_id: pour90.id, qty: 1 }],
       payment_mode: 'cash',
-      cash_amount: 270,
+      cash_amount: 275,
       client_uuid: 'test-90ml-bottle',
     },
   });
   assert.equal(res.status, 201, res.text);
-  assert.equal(res.body.bill.total, 270);
+  assert.equal(res.body.bill.total, 275);
   assert.equal(bottlesOf(product.id), 9.5, '10 bottles minus one 90 ml serve must leave 9.5 bottles');
 });
 
@@ -273,10 +273,10 @@ test('bill totals add lines and reject an underpayment', async () => {
   assert.equal(res.status, 201, res.text);
   const bill = res.body.bill;
   assert.equal(bill.items.length, 2);
-  assert.equal(bill.subtotal, 360);
+  assert.equal(bill.subtotal, 370);
   assert.equal(bill.tax_amount, undefined, 'bills carry no tax');
-  assert.equal(bill.total, 360);
-  assert.equal(bill.cash_amount, 360);
+  assert.equal(bill.total, 370);
+  assert.equal(bill.cash_amount, 370);
   assert.equal(bill.cash_received, 1000);
   assert.match(bill.bill_no, /^[A-Z]{2,6}-\d+/, 'bill numbers carry a document prefix');
 
@@ -299,13 +299,13 @@ test('only the Owner can delete a bill, and the record is never erased', async (
     body: {
       items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 2 }],
       payment_mode: 'cash',
-      cash_amount: 140,
+      cash_amount: 150,
       client_uuid: 'test-delete-1',
     },
   });
   assert.equal(created.status, 201, created.text);
   const bill = created.body.bill;
-  assert.equal(bill.total, 140);
+  assert.equal(bill.total, 150);
   const stockBefore = bottlesOf(state.liquor.id);
 
   // Staff and managers are refused even when they supply the correct PIN.
@@ -381,14 +381,14 @@ test('a bill total is exactly the selling price with no tax or discount', async 
     body: {
       items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 2 }],
       payment_mode: 'cash',
-      cash_amount: 140,
+      cash_amount: 150,
       client_uuid: 'test-notax-1',
     },
   });
   assert.equal(res.status, 201, res.text);
   const bill = res.body.bill;
-  assert.equal(bill.subtotal, 140);
-  assert.equal(bill.total, 140, 'the guest pays the exact selling price');
+  assert.equal(bill.subtotal, 150);
+  assert.equal(bill.total, 150, 'the guest pays the exact selling price');
   for (const key of ['tax_amount', 'tax_percent', 'discount', 'service_charge', 'round_off']) {
     assert.equal(bill[key], undefined, `${key} must not exist on a bill`);
   }
@@ -408,15 +408,15 @@ test('a running table tab can be opened, served and settled', async () => {
   });
   assert.equal(add.status, 201, add.text);
   assert.equal(add.body.order.items.length, 1);
-  // 60 ml of a ₹70/30 ml pour costs ₹140, so two serves are ₹280.
-  assert.equal(add.body.order.subtotal, 280);
+  // 60 ml of a ₹420 bottle costs ₹145, so two serves are ₹290.
+  assert.equal(add.body.order.subtotal, 290);
 
   const pay = await call('POST', `/api/orders/${orderId}/pay`, {
     token: tokens.staff,
-    body: { payment_mode: 'cash', cash_amount: 280, client_uuid: 'test-tab-pay-1' },
+    body: { payment_mode: 'cash', cash_amount: 290, client_uuid: 'test-tab-pay-1' },
   });
   assert.equal(pay.status, 201, pay.text);
-  assert.equal(pay.body.bill.total, 280);
+  assert.equal(pay.body.bill.total, 290);
   const consumedMl = (before - bottlesOf(state.liquor.id)) * 180;
   assert.ok(Math.abs(consumedMl - 120) < 0.05, `expected 120 ml deducted, got ${consumedMl}`);
 
@@ -520,7 +520,7 @@ test('voiding a bill returns the bottle fraction to stock', async () => {
     body: {
       items: [{ product_id: state.liquor.id, variant_id: pour90.id, qty: 1 }],
       payment_mode: 'cash',
-      cash_amount: 210,
+      cash_amount: 215,
       client_uuid: 'test-void-1',
     },
   });
@@ -574,7 +574,7 @@ test('offline sync state and push replay bills idempotently', async () => {
         client_uuid: 'offline-bill-1',
         items: [{ product_id: state.liquor.id, variant_id: pour30.id, qty: 1 }],
         payment_mode: 'cash',
-        cash_amount: 70,
+        cash_amount: 75,
       },
     ],
   };
