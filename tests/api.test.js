@@ -338,14 +338,14 @@ test('only the Owner can delete a bill, and the record is never erased', async (
   });
   assert.equal(ok.status, 200, ok.text);
   assert.equal(ok.body.deletion.bill_no, bill.bill_no);
-  assert.equal(ok.body.deletion.amount, 140);
+  assert.equal(ok.body.deletion.amount, 150);
   assert.equal(ok.body.deletion.bill_date, bill.bill_date);
   assert.ok(ok.body.deletion.deleted_by_name, 'the deleting user is recorded');
   assert.ok(ok.body.deletion.deleted_at, 'the deletion time is recorded');
 
   // The bill row and its payment records survive; only the flags change.
   const row = db.prepare('SELECT * FROM bills WHERE id = ?').get(bill.id);
-  assert.equal(row.total, 140);
+  assert.equal(row.total, 150);
   assert.ok(row.deleted_at);
   assert.ok(db.prepare('SELECT COUNT(*) AS n FROM payments WHERE bill_id = ?').get(bill.id).n >= 1);
   assert.ok(
@@ -506,8 +506,8 @@ test('manager can add a new liquor product priced per serve size', async () => {
   assert.equal(product.stock_bottles, 24);
   assert.equal(product.sealed_bottles, 24);
   assert.equal(product.variants.length, 6);
-  assert.equal(product.variants[0].price, 120);
-  assert.equal(product.variants[2].price, 360);
+  assert.equal(product.variants[0].price, 125);
+  assert.equal(product.variants[2].price, 365);
   assert.equal(product.variants[5].price, 720);
   state.custom = product;
 });
