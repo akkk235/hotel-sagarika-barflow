@@ -143,13 +143,19 @@ router.post('/purchases', authenticate, manager, (req, res) => {
     const prepared = items.map((item) => {
       const product = db.prepare('SELECT * FROM products WHERE id = ?').get(Number(item.product_id));
       if (!product) throw new HttpError(400, 'Product not found on purchase line');
+      const variantId = item.variant_id ? Number(item.variant_id) : null;
+      const variant = variantId
+        ? db.prepare('SELECT * FROM product_variants WHERE id = ? AND product_id = ?').get(variantId, product.id)
+        : null;
+      if (variantId && !variant) throw new HttpError(400, 'Bottle size not found on purchase line');
       const bottles = toNum(item.bottles, 0);
-      const mlPerBottle = toNum(item.ml_per_bottle, product.bottle_size_ml || 0);
+      if (bottles <= 0) throw new HttpError(400, 'Purchase quantity must be greater than zero');
+      const mlPerBottle = toNum(item.ml_per_bottle, product.bottle_size_ml || variant?.ml || 0);
       const totalMl = product.unit_type === 'ml' ? bottles * mlPerBottle : bottles;
-      const unitCost = toNum(item.unit_cost, product.cost_price);
+      const unitCost = toNum(item.unit_cost, variant?.cost_price ?? product.cost_price);
       const amount = money(bottles * unitCost);
       total = money(total + amount);
-      return { product, bottles, mlPerBottle, totalMl, unitCost, amount };
+      return { product, variant, bottles, mlPerBottle, totalMl, unitCost, amount };
     });
     const result = db
       .prepare(
@@ -160,9 +166,53 @@ router.post('/purchases', authenticate, manager, (req, res) => {
     const purchaseId = Number(result.lastInsertRowid);
     for (const line of prepared) {
       db.prepare(
-        `INSERT INTO purchase_items (purchase_id, product_id, bottles, ml_per_bottle, total_ml, unit_cost, amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(purchaseId, line.product.id, line.bottles, line.mlPerBottle, line.totalMl, line.unitCost, line.amount);
+        `INSERT INTO purchase_items (purchase_id, product_id, variant_id, bottles, ml_per_bottle, total_ml, unit_cost, amount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        purchaseId,
+        line.product.id,
+        line.variant?.id || null,
+        line.bottles,
+        line.mlPerBottle,
+        line.totalMl,
+        line.unitCost,
+        line.amount,
+      );
+
+      // Beer: bottles are received into one specific bottle size.
+      if (line.product.stock_mode === 'variant') {
+        if (!line.variant) throw new HttpError(400, 'Choose the bottle size being purchased');
+        const nextSize = Math.round(((Number(line.variant.stock_qty) || 0) + line.bottles) * 10000) / 10000;
+        db.prepare('UPDATE product_variants SET stock_qty = ?, cost_price = ? WHERE id = ?').run(
+          nextSize,
+          line.unitCost,
+          line.variant.id,
+        );
+        const totalStock = db
+          .prepare('SELECT COALESCE(SUM(stock_qty), 0) AS t FROM product_variants WHERE product_id = ?')
+          .get(line.product.id).t;
+        db.prepare('UPDATE products SET stock_qty = ?, cost_price = ?, updated_at = ? WHERE id = ?').run(
+          Math.round((Number(totalStock) || 0) * 10000) / 10000,
+          line.unitCost,
+          now,
+          line.product.id,
+        );
+        db.prepare(
+          `INSERT INTO stock_ledger (product_id, variant_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
+           VALUES (?, ?, ?, ?, 'purchase', 'purchase', ?, ?, ?, ?)`,
+        ).run(
+          line.product.id,
+          line.variant.id,
+          line.bottles,
+          nextSize,
+          purchaseId,
+          `Purchase ${invoice_no || purchaseId} (${line.variant.label})`,
+          req.user.id,
+          now,
+        );
+        continue;
+      }
+
       // Liquor is stocked in sealed 180 ml bottles; the ledger must stay in bottles so
       // purchases, sales deductions and the stock report all reconcile.
       const isLiquor = line.product.unit_type === 'ml';
