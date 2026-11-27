@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seedIfEmpty, ensureDiningTables, ensureRooms } from './seed.js';
+import { migrateCatalog } from './migrations.js';
 import { HttpError } from './util.js';
 import authRoutes from './routes/auth.js';
 import catalogRoutes from './routes/catalog.js';
