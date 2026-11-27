@@ -2,12 +2,13 @@
  * Pricing rules for Hotel Sagarika BarFlow.
  *
  * Liquor is bought and stocked in sealed 180 ml bottles. The user enters the
- * selling price of a 180 ml bottle and every pour is priced proportionally:
+ * selling price of a 180 ml bottle. Every loose pour is priced proportionally
+ * and then carries a ₹5 loose-serving charge, rounded UP to the next ₹5:
  *
- *   serving price = (bottle price / 180) * serving size
+ *   final = CEILING((((bottle price / 180) * serving size) + 5) / 5) * 5
  *
- * The result is rounded UP to the next multiple of ₹5. A price that is already
- * a multiple of ₹5 is left untouched (₹220 stays ₹220, it does not become ₹225).
+ * For a ₹440 bottle: 30 ml ₹80, 60 ml ₹155, 90 ml ₹225, 120 ml ₹300, 150 ml ₹375.
+ * The full 180 ml bottle is sold at the entered bottle price, unchanged (₹440).
  *
  * Beer is deliberately different: every bottle size (650/500/330 ml ...) is an
  * independent product variant with its own purchase price and selling price.
@@ -16,6 +17,9 @@
 
 export const BOTTLE_ML = 180;
 export const POUR_SIZES = [30, 60, 90, 120, 150, 180];
+
+/** Flat charge added to every loose serving before rounding up to the next ₹5. */
+export const LOOSE_SERVING_MARKUP = 5;
 
 /** Bottle sizes offered by default for a new beer product (admins may add more). */
 export const BEER_DEFAULT_SIZES = [650, 500, 330];
@@ -41,9 +45,16 @@ export function rawServingPrice(bottlePrice, ml) {
   return Math.round(((price / BOTTLE_ML) * size) * 100) / 100;
 }
 
-/** Selling price for one pour: proportional, then rounded up to a multiple of ₹5. */
+/**
+ * Selling price for one pour: the proportional share of the bottle price plus the
+ * ₹5 loose-serving charge, rounded up to a multiple of ₹5.
+ * The full 180 ml bottle is sold at the entered bottle price, unchanged.
+ */
 export function liquorServingPrice(bottlePrice, ml) {
-  return roundUpToFive(rawServingPrice(bottlePrice, ml));
+  const raw = rawServingPrice(bottlePrice, ml);
+  if (!raw) return 0;
+  if (Number(ml) === BOTTLE_ML) return roundUpToFive(raw);
+  return roundUpToFive(raw + LOOSE_SERVING_MARKUP);
 }
 
 export function pourLabel(ml) {

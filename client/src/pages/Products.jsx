@@ -6,13 +6,17 @@ const POURS = [30, 60, 90, 120, 150, 180];
 const BOTTLE_ML = 180;
 const BEER_SIZES = [650, 500, 330];
 
-/** Serving price = (180 ml bottle price / 180) × serving size, rounded UP to the next ₹5. */
+/** Loose pour = (bottle price / 180) × ml + ₹5, rounded UP to the next ₹5. 180 ml stays as entered. */
 const roundUpToFive = (v) => {
   const n = Number(v) || 0;
   if (n <= 0) return 0;
   return Math.ceil((n - 1e-9) / 5) * 5;
 };
-const servePrice = (bottlePrice, ml) => roundUpToFive(((Number(bottlePrice) || 0) / BOTTLE_ML) * ml);
+const servePrice = (bottlePrice, ml) => {
+  const share = ((Number(bottlePrice) || 0) / BOTTLE_ML) * ml;
+  if (share <= 0) return 0;
+  return Number(ml) === BOTTLE_ML ? roundUpToFive(share) : roundUpToFive(share + 5);
+};
 
 const bottlesOf = (p) =>
   Number(p.stock_bottles ?? (p.unit_type === 'ml' ? Number(p.stock_qty) / BOTTLE_ML : Number(p.stock_qty))) || 0;
@@ -422,7 +426,7 @@ export default function Products({ data, user, notify, refresh, online }) {
                   </div>
                 ) : null}
                 <div className="tiny muted" style={{ marginTop: 8 }}>
-                  Serving prices (rounded up to the next ₹5)
+                  Serving prices (bottle share + ₹5, rounded up to the next ₹5; 180 ml full bottle unchanged)
                 </div>
                 <div className="card" style={{ marginTop: 6 }}>
                   {POURS.map((ml) => (
