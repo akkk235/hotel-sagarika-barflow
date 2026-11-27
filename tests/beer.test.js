@@ -369,3 +369,22 @@ test('liquor stock still reports sealed bottles and fractions', async () => {
   assert.equal(Number(liquor.stock_bottles), bottlesOf(state.liquor.id));
   assert.ok(String(liquor.stock_bottles).includes('.') || liquor.stock_bottles === 9.5);
 });
+
+/* ------------------------------------------- 9. SEEDED CATALOGUE INTEGRITY */
+
+test('seeded beer product keeps exactly one row per bottle size and matching bottle stock', async () => {
+  const res = await call('GET', '/api/products', { token: tokens.owner });
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.text);
+  const list = Array.isArray(body) ? body : body.products || [];
+  const beer = list.find((p) => p.name === 'Kingfisher Strong Beer');
+  assert.ok(beer, 'seeded beer product is present');
+
+  const sizes = beer.variants.map((v) => Number(v.ml)).sort((a, b) => a - b);
+  assert.deepEqual(sizes, [330, 500, 650], 'one variant per default bottle size, no duplicates');
+
+  const perSize = beer.variants.reduce((sum, v) => sum + Number(v.stock_qty || 0), 0);
+  assert.equal(Number(beer.stock_qty), perSize, 'product stock equals the sum of its sizes');
+  assert.equal(Number(beer.stock_bottles), perSize, 'bottle stock is exposed for the product card');
+  assert.ok(perSize > 0, 'seeded beer stock is visible in billing');
+});
