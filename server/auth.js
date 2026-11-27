@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { db, getSetting, setSetting } from './db.js';
+import { permissionsFor, roleLabel } from './permissions.js';
 import { nowISO } from './util.js';
 
 const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days - bar staff stay logged in offline
@@ -70,7 +71,15 @@ export function revokeToken(jti) {
 }
 
 export function publicUser(user) {
-  return { id: user.id, name: user.name, username: user.username, role: user.role, phone: user.phone };
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    role: user.role,
+    role_label: roleLabel(user.role),
+    phone: user.phone,
+    permissions: permissionsFor(user),
+  };
 }
 
 export function authenticate(req, res, next) {
@@ -104,3 +113,20 @@ export function requireRole(...roles) {
 }
 
 export const manager = requireRole('owner', 'manager');
+
+/**
+ * Allow the request when the signed-in user holds at least one of the keys.
+ * Permissions come from users.permissions (Admin-managed) with role defaults,
+ * so an existing Manager keeps working and a Billing Staff account only gains
+ * extra access when the Admin grants it explicitly.
+ */
+export function requirePermission(...keys) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const perms = req.user.permissions || permissionsFor({ role: req.user.role });
+    if (keys.some((key) => perms.includes(key))) return next();
+    return res.status(403).json({
+      error: `Your account is not permitted to do this (${keys.join(' or ')})`,
+    });
+  };
+}
