@@ -53,6 +53,8 @@ const managerToken = await login('manager', 'manager123');
 const liquor = db
   .prepare("SELECT id, name, stock_bottles FROM products WHERE unit_type = 'ml' ORDER BY id LIMIT 1")
   .get();
+// Seeded products already carry opening stock; all checks are relative to it.
+const openingStock = liquor.stock_bottles;
 
 /* ---------------------------------------------------------------- settings */
 
@@ -129,13 +131,13 @@ test('stock entry persists in the database with a unique transaction id', async 
   assert.equal(res.status, 200, res.text);
 
   const row = db.prepare('SELECT stock_bottles FROM products WHERE id = ?').get(liquor.id);
-  assert.equal(row.stock_bottles, 50);
+  assert.equal(row.stock_bottles, openingStock + 50);
 
   const ledger = db
     .prepare("SELECT * FROM stock_ledger WHERE product_id = ? AND movement = 'purchase' ORDER BY id DESC LIMIT 1")
     .get(liquor.id);
   assert.equal(ledger.change_qty, 50);
-  assert.equal(ledger.balance_qty, 50);
+  assert.equal(ledger.balance_qty, openingStock + 50);
   assert.ok(ledger.txn_id && ledger.txn_id.length >= 8, 'stock entry needs a unique transaction id');
   assert.ok(ledger.created_by, 'stock entry must record the user');
   assert.ok(ledger.created_at, 'stock entry must record the date and time');
@@ -147,11 +149,11 @@ test('stock survives logout, a different login and a fresh request', async () =>
   const res = await call('GET', '/api/products?include_inactive=0', { token: freshOwner });
   assert.equal(res.status, 200);
   const product = res.body.products.find((p) => p.id === liquor.id);
-  assert.equal(product.stock_bottles, 50, 'stock must come from the database, not the session');
+  assert.equal(product.stock_bottles, openingStock + 50, 'stock must come from the database, not the session');
 
   // Simulate an application restart: a brand new token and connection state.
   const again = await call('GET', `/api/products?include_inactive=0`, { token: await login('owner', 'owner123') });
-  assert.equal(again.body.products.find((p) => p.id === liquor.id).stock_bottles, 50);
+  assert.equal(again.body.products.find((p) => p.id === liquor.id).stock_bottles, openingStock + 50);
 });
 
 test('a second stock purchase accumulates and stays unique per entry', async () => {
@@ -161,7 +163,7 @@ test('a second stock purchase accumulates and stays unique per entry', async () 
   });
   assert.equal(res.status, 200, res.text);
   const row = db.prepare('SELECT stock_bottles FROM products WHERE id = ?').get(liquor.id);
-  assert.equal(row.stock_bottles, 62);
+  assert.equal(row.stock_bottles, openingStock + 62);
 
   const ids = db
     .prepare("SELECT txn_id FROM stock_ledger WHERE product_id = ? AND movement = 'purchase'")
@@ -228,7 +230,7 @@ test('Excel export returns a real .xlsx file for daily and monthly stock reports
 test('admin can reset another user password and the new password works', async () => {
   const res = await call('POST', `/api/settings/users/${staffId}/password`, {
     token: ownerToken,
-    body: { new_password: 'brandnew123' },
+    body: { password: 'brandnew123' },
   });
   assert.equal(res.status, 200, res.text);
   const token = await login('testbilling', 'brandnew123');
