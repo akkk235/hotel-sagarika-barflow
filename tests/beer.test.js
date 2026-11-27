@@ -291,7 +291,7 @@ test('an underpaid (failed) bill does not deduct beer stock', async () => {
 test('beer purchase entry receives bottles into one size and updates its cost', async () => {
   const size650 = state.beer.variants.find((v) => Number(v.ml) === 650);
   const before = sizeStock(size650.id);
-  const res = await call('POST', '/api/purchases', {
+  const res = await call('POST', '/api/admin/purchases', {
     token: tokens.manager,
     body: {
       purchase_date: today,

@@ -847,8 +847,10 @@ test('stock: a rejected bill never deducts stock', async () => {
 });
 
 test('stock: soft drinks and snacks deduct unit quantity', async () => {
+  // Beer is managed per bottle size (stock_mode='variant'), which this beer test file covers;
+  // here we assert the plain unit-counted products (soft drinks, snacks).
   const product = tdb
-    .prepare("SELECT * FROM products WHERE unit_type != 'ml' ORDER BY id LIMIT 1")
+    .prepare("SELECT * FROM products WHERE unit_type != 'ml' AND COALESCE(stock_mode,'unit') = 'unit' ORDER BY id LIMIT 1")
     .get();
   assert.ok(product, 'a unit product is seeded');
   tdb.prepare('UPDATE products SET stock_qty = 20 WHERE id = ?').run(product.id);
