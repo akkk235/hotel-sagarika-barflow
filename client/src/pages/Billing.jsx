@@ -64,6 +64,10 @@ export default function Billing({ data, settings, user, online, notify, refresh,
   const change = mode === 'cash' ? r2((Number(cashReceived) || 0) - total) : 0;
 
   function stockLabel(product, variant) {
+    // Beer: every bottle size keeps its own stock, counted in whole bottles.
+    if (product.stock_mode === 'variant') {
+      return `${Math.floor(Number(variant.stock_qty) || 0)} bottles`;
+    }
     if (product.unit_type === 'ml') {
       const serves = variant.consume_qty > 0 ? Math.floor((bottlesOf(product) * BOTTLE_ML) / variant.consume_qty) : 0;
       return `${serves} left`;
@@ -72,8 +76,9 @@ export default function Billing({ data, settings, user, online, notify, refresh,
   }
 
   function openProduct(product) {
-    const firstInStock =
-      product.variants.find((v) => bottlesOf(product) * BOTTLE_ML >= (v.consume_qty || 0)) || product.variants[0];
+    const firstInStock = product.stock_mode === 'variant'
+      ? product.variants.find((v) => (Number(v.stock_qty) || 0) > 0) || product.variants[0]
+      : product.variants.find((v) => bottlesOf(product) * BOTTLE_ML >= (v.consume_qty || 0)) || product.variants[0];
     setPick({ product, variantId: firstInStock?.id, qty: 1 });
   }
 
@@ -329,9 +334,11 @@ export default function Billing({ data, settings, user, online, notify, refresh,
                 <span className={`stock-line ${out ? 'out' : low ? 'low' : ''}`}>
                   {out
                     ? 'Out of stock'
-                    : p.unit_type === 'ml'
-                      ? `${bottlesOf(p).toFixed(2)} bottles left`
-                      : `${Math.floor(bottlesOf(p))} units left`}
+                    : p.stock_mode === 'variant'
+                      ? `${Math.floor(bottlesOf(p))} bottles · ${p.variants.length} sizes`
+                      : p.unit_type === 'ml'
+                        ? `${bottlesOf(p).toFixed(2)} bottles left`
+                        : `${Math.floor(bottlesOf(p))} units left`}
                 </span>
               </button>
             );
@@ -368,7 +375,12 @@ export default function Billing({ data, settings, user, online, notify, refresh,
               <div>
                 <h3>{pick.product.name}</h3>
                 <div className="tiny muted">
-                  {pick.product.category_name} · {pick.product.unit_type === 'ml' ? bottleText(pick.product) : `${Math.floor(bottlesOf(pick.product))} units in stock`}
+                  {pick.product.category_name} ·{' '}
+                  {pick.product.stock_mode === 'variant'
+                    ? `${Math.floor(bottlesOf(pick.product))} bottles in stock (all sizes)`
+                    : pick.product.unit_type === 'ml'
+                      ? bottleText(pick.product)
+                      : `${Math.floor(bottlesOf(pick.product))} units in stock`}
                 </div>
               </div>
               <button className="btn btn-sm" type="button" onClick={() => setPick(null)}>
@@ -377,11 +389,16 @@ export default function Billing({ data, settings, user, online, notify, refresh,
             </div>
 
             <div className="tiny muted" style={{ marginBottom: 6 }}>
-              Serving size
+              {pick.product.stock_mode === 'variant' ? 'Bottle size' : 'Serving size'}
             </div>
             <div className="pour-grid">
               {pick.product.variants.map((v) => {
-                const out = pick.product.unit_type === 'ml' ? bottlesOf(pick.product) * BOTTLE_ML < v.consume_qty : bottlesOf(pick.product) < 1;
+                const out =
+                  pick.product.stock_mode === 'variant'
+                    ? (Number(v.stock_qty) || 0) < 1
+                    : pick.product.unit_type === 'ml'
+                      ? bottlesOf(pick.product) * BOTTLE_ML < v.consume_qty
+                      : bottlesOf(pick.product) < 1;
                 return (
                   <button
                     key={v.id}
@@ -419,7 +436,11 @@ export default function Billing({ data, settings, user, online, notify, refresh,
               <button
                 className="btn btn-primary"
                 type="button"
-                disabled={busy}
+                disabled={
+                  busy ||
+                  (pick.product.stock_mode === 'variant' &&
+                    (Number(pick.product.variants.find((v) => v.id === pick.variantId)?.stock_qty) || 0) < 1)
+                }
                 onClick={() => {
                   const variant = pick.product.variants.find((v) => v.id === pick.variantId);
                   if (!variant) return;
