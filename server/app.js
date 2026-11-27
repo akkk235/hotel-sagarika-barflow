@@ -16,6 +16,7 @@ import adminRoutes from './routes/admin.js';
 import lodgingRoutes from './routes/lodging.js';
 import dashboardRoutes from './routes/dashboard.js';
 import dayRoutes from './routes/day.js';
+import settingsRoutes from './routes/settings.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
@@ -54,6 +55,7 @@ export function createApp() {
   app.use('/api/day', dayRoutes);
   app.use('/api/sync', syncRoutes);
   app.use('/api/admin', adminRoutes);
+  app.use('/api/settings', settingsRoutes);
 
   app.use('/api', (req, res) => {
     res.status(404).json({ error: `Unknown API route ${req.method} ${req.originalUrl}` });
