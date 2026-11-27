@@ -11,8 +11,11 @@ FROM node:26-alpine
 RUN echo "os-refresh 2026-11-11" && apk upgrade --no-cache
 WORKDIR /app
 COPY --from=build /app ./
+# The container runs as a non-root user, so the SQLite data directory must be writable.
+RUN mkdir -p /app/data && chmod 777 /app/data
 ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE 3000
+USER node
 # IMPORTANT: your server MUST listen on 0.0.0.0 and process.env.PORT.
 CMD ["npm","start"]
