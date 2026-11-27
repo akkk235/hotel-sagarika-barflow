@@ -19,6 +19,7 @@ import Products from './pages/Products.jsx';
 import Reports from './pages/Reports.jsx';
 import DayClosing from './pages/DayClosing.jsx';
 import More from './pages/More.jsx';
+import Settings from './pages/Settings.jsx';
 
 const TABS = [
   { id: 'home', label: 'Home', icon: '🏠' },
@@ -27,6 +28,7 @@ const TABS = [
   { id: 'rooms', label: 'Rooms', icon: '🛏️' },
   { id: 'products', label: 'Stock', icon: '🍾' },
   { id: 'more', label: 'More', icon: '⚙️' },
+  { id: 'settings', label: 'Settings', icon: '🛠️', adminOnly: true },
 ];
 
 export default function App() {
@@ -229,7 +231,7 @@ export default function App() {
       </main>
 
       <nav className="bottom-nav">
-        {TABS.map((t) => (
+        {TABS.filter((t) => !t.adminOnly || user?.role === 'owner').map((t) => (
           <button
             key={t.id}
             type="button"
