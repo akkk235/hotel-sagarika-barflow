@@ -34,8 +34,10 @@ export function resolveItems(rawItems) {
       line_total: money(unitPrice * qty),
       consume_qty: variant.consume_qty,
       unit_type: product.unit_type,
+      stock_mode: product.stock_mode || 'unit',
       stock_qty: product.stock_qty,
       stock_bottles: product.stock_bottles,
+      variant_stock: variant.stock_qty,
       bottle_size_ml: product.bottle_size_ml || 180,
     });
   }
@@ -93,9 +95,58 @@ function deductStock(lines, billId, userId, createdAt) {
     `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
      VALUES (?, ?, ?, 'sale', 'bill', ?, ?, ?, ?)`,
   );
+  // Beer keeps one balance per bottle size, so the size travels with the movement.
+  const ledgerVariant = db.prepare(
+    `INSERT INTO stock_ledger (product_id, variant_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
+     VALUES (?, ?, ?, ?, 'sale', 'bill', ?, ?, ?, ?)`,
+  );
+  // A bill posts its stock movement exactly once: replayed/updated bills must not
+  // deduct a second time.
+  const alreadyPosted = db
+    .prepare("SELECT COUNT(*) AS c FROM stock_ledger WHERE movement = 'sale' AND ref_type = 'bill' AND ref_id = ?")
+    .get(billId).c;
+  if (alreadyPosted > 0) return [];
   const warnings = [];
   for (const line of lines) {
     const product = db.prepare('SELECT * FROM products WHERE id = ?').get(line.product_id);
+
+    // Beer: stock is counted in bottles of one specific size.
+    if (product.stock_mode === 'variant') {
+      const variant = db.prepare('SELECT * FROM product_variants WHERE id = ?').get(line.variant_id);
+      if (!variant) throw new HttpError(400, `Selected bottle size for ${line.product_name} is unavailable`);
+      const current = Number(variant.stock_qty) || 0;
+      const next = Math.round((current - line.qty) * 10000) / 10000;
+      if (next < 0 && !allowNegative) {
+        throw new HttpError(
+          400,
+          `Not enough stock for ${line.product_name} ${variant.label} (${current} bottles left)`,
+        );
+      }
+      db.prepare('UPDATE product_variants SET stock_qty = ? WHERE id = ?').run(next, variant.id);
+      const total = db
+        .prepare('SELECT COALESCE(SUM(stock_qty), 0) AS t FROM product_variants WHERE product_id = ?')
+        .get(product.id).t;
+      db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?').run(
+        Math.round((Number(total) || 0) * 10000) / 10000,
+        createdAt,
+        product.id,
+      );
+      ledgerVariant.run(
+        product.id,
+        variant.id,
+        -line.qty,
+        next,
+        billId,
+        `${variant.label} x ${line.qty} on ${line.product_name}`,
+        userId,
+        createdAt,
+      );
+      if (next <= 0) warnings.push(`${line.product_name} ${variant.label} is out of stock`);
+      else if (next <= product.low_stock_qty) {
+        warnings.push(`${line.product_name} ${variant.label} is low on stock (${next} bottles left)`);
+      }
+      continue;
+    }
 
     // Liquor is stocked in sealed 180 ml bottles: a 90 ml pour removes exactly half a bottle.
     if (product.unit_type === 'ml') {
@@ -156,10 +207,40 @@ export function restoreStock(bill, userId) {
     `INSERT INTO stock_ledger (product_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
      VALUES (?, ?, ?, 'return', 'bill-void', ?, ?, ?, ?)`,
   );
+  const ledgerVariant = db.prepare(
+    `INSERT INTO stock_ledger (product_id, variant_id, change_qty, balance_qty, movement, ref_type, ref_id, note, created_by, created_at)
+     VALUES (?, ?, ?, ?, 'return', 'bill-void', ?, ?, ?, ?)`,
+  );
   const now = nowISO();
   for (const item of items) {
     const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
     const variant = db.prepare('SELECT * FROM product_variants WHERE id = ?').get(item.variant_id);
+
+    // Beer: give the bottles back to the exact size that was sold.
+    if (product?.stock_mode === 'variant') {
+      if (!variant) continue;
+      const next = Math.round(((Number(variant.stock_qty) || 0) + item.qty) * 10000) / 10000;
+      db.prepare('UPDATE product_variants SET stock_qty = ? WHERE id = ?').run(next, variant.id);
+      const total = db
+        .prepare('SELECT COALESCE(SUM(stock_qty), 0) AS t FROM product_variants WHERE product_id = ?')
+        .get(item.product_id).t;
+      db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?').run(
+        Math.round((Number(total) || 0) * 10000) / 10000,
+        now,
+        item.product_id,
+      );
+      ledgerVariant.run(
+        item.product_id,
+        variant.id,
+        item.qty,
+        next,
+        bill.id,
+        `Void of ${bill.bill_no} (${variant.label})`,
+        userId,
+        now,
+      );
+      continue;
+    }
 
     // Give the exact bottle fraction back for liquor voids.
     if (product?.unit_type === 'ml') {
