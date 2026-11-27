@@ -215,6 +215,9 @@ export default function App() {
         {tab === 'day' ? (
           <DayClosing user={user} notify={notify} online={online} />
         ) : null}
+        {tab === 'settings' && user?.role === 'owner' ? (
+          <Settings user={user} notify={notify} online={online} />
+        ) : null}
         {tab === 'more' ? (
           <More
             data={data}
