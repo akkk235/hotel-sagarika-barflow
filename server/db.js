@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS purchase_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   purchase_id INTEGER NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
   product_id INTEGER NOT NULL REFERENCES products(id),
+  variant_id INTEGER REFERENCES product_variants(id) ON DELETE SET NULL,
   bottles REAL NOT NULL DEFAULT 1,
   ml_per_bottle INTEGER NOT NULL DEFAULT 750,
   total_ml REAL NOT NULL DEFAULT 0,
@@ -119,6 +120,7 @@ CREATE TABLE IF NOT EXISTS purchase_items (
 CREATE TABLE IF NOT EXISTS stock_ledger (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  variant_id INTEGER REFERENCES product_variants(id) ON DELETE SET NULL,
   change_qty REAL NOT NULL,
   balance_qty REAL NOT NULL,
   movement TEXT NOT NULL CHECK (movement IN ('opening','purchase','sale','adjustment','wastage','return')),

@@ -24,6 +24,9 @@ seedIfEmpty();
 // Guarantee the corrected inventory/table/room setup on every boot.
 ensureDiningTables();
 ensureRooms();
+// Additive, backed-up upgrade of existing databases (liquor bottle pricing, beer bottle sizes,
+// per-size stock columns). Safe to run on every boot: it only adds missing columns.
+migrateCatalog();
 
 export function createApp() {
   const app = express();
