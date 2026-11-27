@@ -1152,6 +1152,485 @@ export function reportPnl(f) {
   };
 }
 
+/* ------------------------------------ K. DAY-WISE / MONTHLY STOCK MOVEMENT */
+const tsFrom = (d) => `${d} 00:00:00`;
+const tsTo = (d) => `${d} 23:59:59`;
+
+function monthBounds(month) {
+  const end = db.prepare("SELECT date(? || '-01', '+1 month', '-1 day') AS d").get(month).d;
+  return { from: `${month}-01`, to: end };
+}
+
+function monthsBetween(from, to) {
+  const out = [];
+  let [y, m] = String(from).slice(0, 7).split('-').map(Number);
+  const [ey, em] = String(to).slice(0, 7).split('-').map(Number);
+  while (y < ey || (y === ey && m <= em)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out;
+}
+
+/** Current balance in stock units (bottles for ml/beer, pieces for snacks). */
+function currentBalance(product, variantTotals) {
+  if (product.stock_mode === 'variant') return n(variantTotals.get(product.id));
+  if (product.unit_type === 'ml') return n(product.stock_bottles);
+  return n(product.stock_qty);
+}
+
+const productBalanceRows = () =>
+  db
+    .prepare(
+      `SELECT p.id, p.name, p.unit_type, p.stock_mode, p.stock_qty, p.stock_bottles, p.bottle_size_ml, p.cost_price,
+              COALESCE(c.name,'Uncategorised') AS category
+       FROM products p LEFT JOIN categories c ON c.id = p.category_id
+       WHERE p.is_active = 1 ORDER BY p.name`,
+    )
+    .all();
+
+const variantBalanceRows = () =>
+  db
+    .prepare(
+      `SELECT v.id, v.product_id, v.label, v.ml, v.stock_qty, p.name AS product, p.unit_type, p.cost_price,
+              COALESCE(c.name,'Uncategorised') AS category
+       FROM product_variants v JOIN products p ON p.id = v.product_id
+       LEFT JOIN categories c ON c.id = p.category_id
+       WHERE p.is_active = 1 AND v.is_active = 1
+       ORDER BY p.name, v.sort_order, v.ml`,
+    )
+    .all();
+
+const MOVEMENT_SQL = `
+  SELECT product_id AS product_id,
+         SUM(CASE WHEN created_at <= @endTs THEN change_qty ELSE 0 END) AS change_to_end,
+         SUM(CASE WHEN created_at >= @startTs AND created_at <= @endTs AND movement = 'purchase' AND change_qty > 0 THEN change_qty ELSE 0 END) AS received,
+         SUM(CASE WHEN created_at >= @startTs AND created_at <= @endTs AND movement IN ('adjustment','wastage','return') THEN change_qty ELSE 0 END) AS adjusted,
+         SUM(CASE WHEN created_at >= @startTs AND created_at <= @endTs AND movement = 'sale' THEN -change_qty ELSE 0 END) AS sold,
+         SUM(CASE WHEN created_at >= @startTs AND created_at <= @endTs THEN change_qty ELSE 0 END) AS net
+  FROM stock_ledger
+  WHERE 1 = 1`;
+
+/**
+ * Stock movement for one date range, per product and per beer/liquor size.
+ * Opening stock is derived backwards from the live balance and the ledger, so
+ * the figures always reconcile with the stock the app currently shows.
+ */
+function stockMovementRows(from, to) {
+  const startTs = tsFrom(from);
+  const endTs = tsTo(to);
+  const params = { startTs, endTs };
+  const productAgg = new Map(
+    db.prepare(`${MOVEMENT_SQL} GROUP BY product_id`).all(params).map((r) => [r.product_id, r]),
+  );
+  const lineAgg = new Map(
+    db
+      .prepare(`${MOVEMENT_SQL} AND variant_id IS NULL GROUP BY product_id`)
+      .all(params)
+      .map((r) => [r.product_id, r]),
+  );
+  const variantAgg = new Map(
+    db
+      .prepare(
+        `${MOVEMENT_SQL.replace('product_id AS product_id', 'variant_id AS variant_id')} AND variant_id IS NOT NULL GROUP BY variant_id`,
+      )
+      .all(params)
+      .map((r) => [r.variant_id, r]),
+  );
+
+  const variantTotals = new Map(
+    db
+      .prepare('SELECT product_id, COALESCE(SUM(stock_qty),0) AS total FROM product_variants WHERE is_active = 1 GROUP BY product_id')
+      .all()
+      .map((r) => [r.product_id, r.total]),
+  );
+
+  const purchasesByProduct = new Map(
+    db
+      .prepare(
+        `SELECT pi.product_id, COALESCE(SUM(pi.amount),0) AS amount
+         FROM purchases pu JOIN purchase_items pi ON pi.purchase_id = pu.id
+         WHERE pu.purchase_date BETWEEN @from AND @to GROUP BY pi.product_id`,
+      )
+      .all({ from, to })
+      .map((r) => [r.product_id, r.amount]),
+  );
+  const purchasesByVariant = new Map(
+    db
+      .prepare(
+        `SELECT pi.variant_id, COALESCE(SUM(pi.amount),0) AS amount
+         FROM purchases pu JOIN purchase_items pi ON pi.purchase_id = pu.id
+         WHERE pu.purchase_date BETWEEN @from AND @to AND pi.variant_id IS NOT NULL GROUP BY pi.variant_id`,
+      )
+      .all({ from, to })
+      .map((r) => [r.variant_id, r.amount]),
+  );
+  const salesByProduct = new Map(
+    db
+      .prepare(
+        `SELECT oi.product_id, COALESCE(SUM(oi.line_total),0) AS amount
+         FROM order_items oi JOIN bills b ON b.order_id = oi.order_id
+         WHERE b.status = 'paid' AND b.deleted_at IS NULL AND b.bill_date BETWEEN @from AND @to
+         GROUP BY oi.product_id`,
+      )
+      .all({ from, to })
+      .map((r) => [r.product_id, r.amount]),
+  );
+  const salesByVariant = new Map(
+    db
+      .prepare(
+        `SELECT oi.variant_id, COALESCE(SUM(oi.line_total),0) AS amount
+         FROM order_items oi JOIN bills b ON b.order_id = oi.order_id
+         WHERE b.status = 'paid' AND b.deleted_at IS NULL AND b.bill_date BETWEEN @from AND @to
+         GROUP BY oi.variant_id`,
+      )
+      .all({ from, to })
+      .map((r) => [r.variant_id, r.amount]),
+  );
+
+  const out = [];
+  for (const product of productBalanceRows()) {
+    if (product.stock_mode === 'variant') continue; // sized products render per size below
+    const agg = lineAgg.get(product.id) || {};
+    const balance = currentBalance(product, variantTotals);
+    const opening = r2(balance - n(productAgg.get(product.id)?.change_to_end));
+    const received = r2(n(agg.received));
+    const adjusted = r2(n(agg.adjusted));
+    const sold = r2(n(agg.sold));
+    out.push({
+      product: product.name,
+      category: product.category,
+      size: product.unit_type === 'ml' ? 'Liquor bottle' : 'Unit',
+      unit: product.unit_type === 'ml' ? 'bottles' : 'pcs',
+      opening,
+      received,
+      available: r2(opening + received + adjusted),
+      sold,
+      adjusted,
+      closing: r2(opening + received + adjusted - sold),
+      sealed: product.unit_type === 'ml' ? Math.floor(Math.max(0, opening + received + adjusted - sold)) : null,
+      loose_ml:
+        product.unit_type === 'ml'
+          ? Math.round((Math.max(0, opening + received + adjusted - sold) % 1) * (product.bottle_size_ml || 180))
+          : null,
+      purchase_value: money0(purchasesByProduct.get(product.id)),
+      sales_value: money0(salesByProduct.get(product.id)),
+    });
+  }
+
+  const byProduct = new Map();
+  for (const variant of variantBalanceRows()) {
+    const agg = variantAgg.get(variant.id) || {};
+    const opening = r2(n(variant.stock_qty) - n(agg.change_to_end));
+    const received = r2(n(agg.received));
+    const adjusted = r2(n(agg.adjusted));
+    const sold = r2(n(agg.sold));
+    const closing = r2(opening + received + adjusted - sold);
+    const row = {
+      product: variant.product,
+      category: variant.category,
+      size: variant.label,
+      unit: 'bottles',
+      opening,
+      received,
+      available: r2(opening + received + adjusted),
+      sold,
+      adjusted,
+      closing,
+      sealed: Math.floor(Math.max(0, closing)),
+      loose_ml: Math.round((Math.max(0, closing) % 1) * (variant.ml || 0)),
+      purchase_value: money0(purchasesByVariant.get(variant.id)),
+      sales_value: money0(salesByVariant.get(variant.id)),
+    };
+    out.push(row);
+    const parent = byProduct.get(variant.product_id) || {
+      product: variant.product,
+      category: variant.category,
+      size: 'All sizes',
+      unit: 'bottles',
+      opening: 0,
+      received: 0,
+      available: 0,
+      sold: 0,
+      adjusted: 0,
+      closing: 0,
+      sealed: 0,
+      loose_ml: 0,
+      purchase_value: 0,
+      sales_value: 0,
+    };
+    for (const key of ['opening', 'received', 'available', 'sold', 'adjusted', 'closing', 'purchase_value', 'sales_value']) {
+      parent[key] = money0(parent[key] + row[key]);
+    }
+    byProduct.set(variant.product_id, parent);
+  }
+  out.push(...byProduct.values());
+
+  out.sort((a, b) => a.product.localeCompare(b.product) || String(a.size).localeCompare(String(b.size)));
+  return out;
+}
+
+/** Permanent stock transaction history for the selected range. */
+function stockTransactions(from, to, limit = 500) {
+  return db
+    .prepare(
+      `SELECT sl.id, sl.txn_id, sl.created_at, sl.movement, sl.change_qty, sl.balance_qty, sl.note,
+              p.name AS product, COALESCE(v.label,'') AS size, COALESCE(u.name,'system') AS user
+       FROM stock_ledger sl
+       JOIN products p ON p.id = sl.product_id
+       LEFT JOIN product_variants v ON v.id = sl.variant_id
+       LEFT JOIN users u ON u.id = sl.created_by
+       WHERE sl.created_at >= @startTs AND sl.created_at <= @endTs
+       ORDER BY sl.created_at DESC, sl.id DESC LIMIT @limit`,
+    )
+    .all({ startTs: tsFrom(from), endTs: tsTo(to), limit });
+}
+
+const STOCK_COLUMNS = ['Product', 'Category', 'Size', 'Unit', 'Opening', 'Received', 'Available', 'Sold', 'Adjust', 'Closing', 'Sealed', 'Loose ml'];
+const STOCK_MONEY = ['Purchase ₹', 'Sales ₹'];
+
+function stockRowValues(r, includeCost) {
+  const base = [
+    r.product,
+    r.category,
+    r.size,
+    r.unit,
+    r2(r.opening),
+    r2(r.received),
+    r2(r.available),
+    r2(r.sold),
+    r2(r.adjusted),
+    r2(r.closing),
+    r.sealed ?? '',
+    r.loose_ml ?? '',
+  ];
+  return includeCost ? [...base, money0(r.purchase_value), money0(r.sales_value)] : base;
+}
+
+function stockTotals(rows, includeCost) {
+  const t = rows.reduce(
+    (acc, r) => {
+      acc.opening = money0(acc.opening + n(r.opening));
+      acc.received = money0(acc.received + n(r.received));
+      acc.sold = money0(acc.sold + n(r.sold));
+      acc.adjusted = money0(acc.adjusted + n(r.adjusted));
+      acc.closing = money0(acc.closing + n(r.closing));
+      acc.purchase_value = money0(acc.purchase_value + n(r.purchase_value));
+      acc.sales_value = money0(acc.sales_value + n(r.sales_value));
+      return acc;
+    },
+    { opening: 0, received: 0, sold: 0, adjusted: 0, closing: 0, purchase_value: 0, sales_value: 0 },
+  );
+  if (!includeCost) {
+    delete t.purchase_value;
+    delete t.sales_value;
+  }
+  t.products = rows.length;
+  return t;
+}
+
+/** Day-wise stock report for any selected date (or short range). */
+export function reportStockDaily(f, { includeCost = true } = {}) {
+  const rows = stockMovementRows(f.from, f.to);
+  const transactions = stockTransactions(f.from, f.to);
+  const columns = includeCost ? [...STOCK_COLUMNS, ...STOCK_MONEY] : [...STOCK_COLUMNS];
+  return {
+    title: 'Day-wise Stock Report',
+    columns,
+    rows: rows.map((r) => stockRowValues(r, includeCost)),
+    totals: stockTotals(rows, includeCost),
+    note: `${f.from === f.to ? `Stock movement for ${f.from}` : `Stock movement ${f.from} to ${f.to}`}. Opening stock is derived from the live balance and the permanent stock ledger; ${transactions.length} stock transaction(s) recorded.`,
+    data: { from: f.from, to: f.to, rows, transactions },
+  };
+}
+
+/** Month-wise stock report: one block of rows per month in the range. */
+export function reportStockMonthly(f, { includeCost = true } = {}) {
+  const columns = ['Month', ...(includeCost ? [...STOCK_COLUMNS, ...STOCK_MONEY] : [...STOCK_COLUMNS])];
+  const rows = [];
+  const months = [];
+  for (const month of monthsBetween(f.from, f.to)) {
+    const { from, to } = monthBounds(month);
+    const monthRows = stockMovementRows(from, to);
+    const totals = stockTotals(monthRows, includeCost);
+    months.push({ month, totals, rows: monthRows });
+    for (const r of monthRows) rows.push([month, ...stockRowValues(r, includeCost)]);
+  }
+  return {
+    title: 'Monthly Stock Report',
+    columns,
+    rows,
+    totals: months.reduce((acc, m) => {
+      for (const key of Object.keys(m.totals)) acc[key] = money0(n(acc[key]) + n(m.totals[key]));
+      return acc;
+    }, {}),
+    note: `Monthly opening, received, sold and closing stock for ${f.from} to ${f.to}. Closing stock values use the recorded purchase cost.`,
+    data: { from: f.from, to: f.to, months },
+  };
+}
+
+/** Month-wise sales, purchases, bottles sold, stock value and gross profit. */
+export function reportMonthly(f) {
+  const rows = [];
+  const months = [];
+  for (const month of monthsBetween(f.from, f.to)) {
+    const { from, to } = monthBounds(month);
+    const sales = db
+      .prepare(
+        `SELECT COUNT(*) AS bills, COALESCE(SUM(total),0) AS total, COALESCE(SUM(cash_amount),0) AS cash,
+                COALESCE(SUM(upi_amount),0) AS upi
+         FROM bills WHERE status = 'paid' AND deleted_at IS NULL AND bill_date BETWEEN ? AND ?`,
+      )
+      .get(from, to);
+    const purchases = db
+      .prepare(
+        `SELECT COALESCE(SUM(pi.amount),0) AS amount, COALESCE(SUM(pi.bottles),0) AS bottles, COUNT(DISTINCT pu.id) AS orders
+         FROM purchases pu JOIN purchase_items pi ON pi.purchase_id = pu.id
+         WHERE pu.purchase_date BETWEEN ? AND ?`,
+      )
+      .get(from, to);
+    const items = db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN p.unit_type = 'ml' THEN oi.ml / 180.0 ELSE oi.qty END),0) AS bottles,
+                COALESCE(SUM(CASE WHEN p.unit_type <> 'ml' THEN oi.qty ELSE 0 END),0) AS beer_bottles,
+                COALESCE(SUM(oi.line_total),0) AS sales,
+                COALESCE(SUM(CASE WHEN p.unit_type = 'ml' THEN (oi.ml / 180.0) * p.cost_price ELSE oi.qty * p.cost_price END),0) AS cogs,
+                COALESCE(SUM(CASE WHEN p.cost_price IS NULL OR p.cost_price <= 0 THEN 1 ELSE 0 END),0) AS missing_cost
+         FROM order_items oi
+         JOIN bills b ON b.order_id = oi.order_id
+         JOIN products p ON p.id = oi.product_id
+         WHERE b.status = 'paid' AND b.deleted_at IS NULL AND b.bill_date BETWEEN ? AND ?`,
+      )
+      .get(from, to);
+    const closing = stockValueAt(tsTo(to));
+    const grossProfit = money0(n(items.sales) - n(items.cogs));
+    const row = {
+      month,
+      bills: n(sales.bills),
+      sales: money0(sales.total),
+      cash: money0(sales.cash),
+      upi: money0(sales.upi),
+      purchases: money0(purchases.amount),
+      purchase_orders: n(purchases.orders),
+      bottles_sold: r2(items.bottles),
+      beer_bottles_sold: r2(items.beer_bottles),
+      closing_stock_value: money0(closing.value),
+      cogs: money0(items.cogs),
+      gross_profit: grossProfit,
+      cost_complete: n(items.missing_cost) === 0,
+    };
+    months.push(row);
+    rows.push([
+      month,
+      row.bills,
+      row.sales,
+      row.cash,
+      row.upi,
+      row.purchases,
+      row.purchase_orders,
+      row.bottles_sold,
+      row.beer_bottles_sold,
+      row.closing_stock_value,
+      row.cogs,
+      row.gross_profit,
+    ]);
+  }
+
+  const beerSizes = db
+    .prepare(
+      `SELECT p.name AS product, oi.variant_label AS size, COALESCE(SUM(oi.qty),0) AS qty, COALESCE(SUM(oi.line_total),0) AS amount
+       FROM order_items oi JOIN bills b ON b.order_id = oi.order_id JOIN products p ON p.id = oi.product_id
+       WHERE b.status = 'paid' AND b.deleted_at IS NULL AND b.bill_date BETWEEN @from AND @to AND p.stock_mode = 'variant'
+       GROUP BY p.name, oi.variant_label ORDER BY amount DESC`,
+    )
+    .all({ from: f.from, to: f.to });
+  const liquor = db
+    .prepare(
+      `SELECT p.name AS product, COALESCE(SUM(oi.ml),0) AS ml, COALESCE(SUM(oi.qty),0) AS servings, COALESCE(SUM(oi.line_total),0) AS amount
+       FROM order_items oi JOIN bills b ON b.order_id = oi.order_id JOIN products p ON p.id = oi.product_id
+       WHERE b.status = 'paid' AND b.deleted_at IS NULL AND b.bill_date BETWEEN @from AND @to AND p.unit_type = 'ml'
+       GROUP BY p.name ORDER BY amount DESC`,
+    )
+    .all({ from: f.from, to: f.to })
+    .map((r) => ({ ...r, bottles: r2(n(r.ml) / 180) }));
+  const payments = db
+    .prepare(
+      `SELECT payment_mode AS mode, COUNT(*) AS bills, COALESCE(SUM(total),0) AS amount
+       FROM bills WHERE status = 'paid' AND deleted_at IS NULL AND bill_date BETWEEN ? AND ?
+       GROUP BY payment_mode ORDER BY amount DESC`,
+    )
+    .all(f.from, f.to);
+
+  const totals = {
+    bills: months.reduce((s, m) => s + m.bills, 0),
+    sales: money0(months.reduce((s, m) => s + m.sales, 0)),
+    cash: money0(months.reduce((s, m) => s + m.cash, 0)),
+    upi: money0(months.reduce((s, m) => s + m.upi, 0)),
+    purchases: money0(months.reduce((s, m) => s + m.purchases, 0)),
+    bottles_sold: r2(months.reduce((s, m) => s + m.bottles_sold, 0)),
+    beer_bottles_sold: r2(months.reduce((s, m) => s + m.beer_bottles_sold, 0)),
+    closing_stock_value: money0(months.at(-1)?.closing_stock_value || 0),
+    gross_profit: money0(months.reduce((s, m) => s + m.gross_profit, 0)),
+    cost_complete: months.every((m) => m.cost_complete),
+  };
+
+  return {
+    title: 'Monthly Sales Report',
+    columns: [
+      'Month',
+      'Bills',
+      'Sales ₹',
+      'Cash ₹',
+      'UPI ₹',
+      'Purchases ₹',
+      'Purchase Orders',
+      'Liquor Bottles Sold',
+      'Beer Bottles Sold',
+      'Closing Stock ₹',
+      'COGS ₹',
+      'Gross Profit ₹',
+    ],
+    rows,
+    totals,
+    note: totals.cost_complete
+      ? 'Gross profit uses recorded purchase costs and excludes deleted bills. Purchases are inventory value, not an extra operating expense.'
+      : 'Some sold products have no recorded purchase cost, so gross profit is incomplete for those months.',
+    data: { months, beer_sizes: beerSizes, liquor, payments },
+  };
+}
+
+/** Inventory value at a point in time (current cost, ledger-derived balance). */
+function stockValueAt(endTs) {
+  const variantTotals = new Map(
+    db
+      .prepare('SELECT product_id, COALESCE(SUM(stock_qty),0) AS total FROM product_variants WHERE is_active = 1 GROUP BY product_id')
+      .all()
+      .map((r) => [r.product_id, r.total]),
+  );
+  const moves = new Map(
+    db
+      .prepare('SELECT product_id, SUM(change_qty) AS change_to_end FROM stock_ledger WHERE created_at <= ? GROUP BY product_id')
+      .all(endTs)
+      .map((r) => [r.product_id, n(r.change_to_end)]),
+  );
+  let value = 0;
+  let incomplete = 0;
+  for (const product of productBalanceRows()) {
+    const balance = currentBalance(product, variantTotals) - n(moves.get(product.id));
+    const cost = n(product.cost_price);
+    if (!(cost > 0)) {
+      incomplete += 1;
+      continue;
+    }
+    value += Math.max(0, balance) * cost;
+  }
+  return { value: money0(value), incomplete };
+}
+
 /* --------------------------------------------------------------- DISPATCH */
 export const REPORT_DEFS = {
   daily: { title: 'Daily Sales Report', managerToday: true },
@@ -1167,6 +1646,9 @@ export const REPORT_DEFS = {
   staff: { title: 'Staff-wise Sales', managerToday: true },
   cancellations: { title: 'Cancellation & Refund Report', managerToday: false, ownerOnly: true },
   closing: { title: 'Daily Closing Statement', managerToday: true },
+  stock_daily: { title: 'Day-wise Stock Report', managerToday: true },
+  stock_monthly: { title: 'Monthly Stock Report', managerToday: false, ownerOnly: true },
+  monthly: { title: 'Monthly Sales Report', managerToday: false, ownerOnly: true },
   pnl: { title: 'Profit & Loss', managerToday: false, ownerOnly: true },
 };
 
@@ -1213,6 +1695,12 @@ export function buildReport(name, f, user) {
       return reportCancellations(f);
     case 'closing':
       return reportClosing(f, user);
+    case 'stock_daily':
+      return reportStockDaily(f, { includeCost: user.role === 'owner' });
+    case 'stock_monthly':
+      return reportStockMonthly(f, { includeCost: user.role === 'owner' });
+    case 'monthly':
+      return reportMonthly(f);
     case 'pnl':
       return reportPnl(f);
     default:
