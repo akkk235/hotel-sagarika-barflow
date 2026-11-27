@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, DB_PATH, audit, getSettings, setSetting } from './db.js';
@@ -285,6 +286,38 @@ function repairBeerVariants() {
   return changed;
 }
 
+/**
+ * Additive upgrade for accounts and stock auditability:
+ *  - users.permissions stores granular permissions granted by the Admin;
+ *  - stock_ledger.txn_id gives every stock entry a permanent unique id.
+ * Existing rows keep working: a NULL permissions column falls back to role
+ * defaults, and historic ledger rows are backfilled with stable ids.
+ */
+export function migrateUsersAndStock() {
+  const wanted = [
+    ['users', 'permissions', 'TEXT'],
+    ['stock_ledger', 'txn_id', 'TEXT'],
+  ];
+  const missing = wanted.filter(([table, column]) => !hasColumn(table, column));
+  const backupPath = missing.length ? backupDatabase('accounts-stock-upgrade') : null;
+  for (const [table, column, ddl] of missing) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
+
+  const orphans = db.prepare('SELECT id FROM stock_ledger WHERE txn_id IS NULL').all();
+  if (orphans.length) {
+    const setTxn = db.prepare('UPDATE stock_ledger SET txn_id = ? WHERE id = ?');
+    db.transaction(() => {
+      for (const row of orphans) setTxn.run(`legacy-${row.id}-${crypto.randomUUID()}`, row.id);
+    })();
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_ledger_txn ON stock_ledger(txn_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_ledger_created ON stock_ledger(created_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_bills_bill_date ON bills(bill_date)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_bills_paid_date ON bills(status, bill_date)');
+  return { backup: backupPath, txn_backfilled: orphans.length };
+}
+
 /** Run once at boot, after seeding, before routes serve requests. */
 export function migrateCatalog() {
   const wanted = [
@@ -310,5 +343,6 @@ export function migrateCatalog() {
   const looseMarkup = migrateLiquorLooseMarkup();
   const beer = migrateBeerSizes();
   const repaired = repairBeerVariants();
-  return { backup: backupPath, liquor, looseMarkup, beer, repaired };
+  const accounts = migrateUsersAndStock();
+  return { backup: backupPath, liquor, looseMarkup, beer, repaired, accounts };
 }
