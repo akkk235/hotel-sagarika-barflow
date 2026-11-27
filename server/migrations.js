@@ -104,6 +104,40 @@ function migrateLiquorPricing() {
 }
 
 /**
+ * Liquor loose-serving charge: the proportional share plus ₹5, rounded up to ₹5.
+ * The full 180 ml bottle keeps the entered bottle price. Existing pours are re-priced
+ * once; historical bills keep their own price snapshots.
+ */
+function migrateLiquorLooseMarkup() {
+  if (getSettings().liquor_pricing_v4 === '1') return false;
+  const now = new Date().toISOString();
+  const products = db
+    .prepare("SELECT * FROM products WHERE unit_type = 'ml' AND COALESCE(bottle_price, 0) > 0")
+    .all();
+  let changed = 0;
+  for (const product of products) {
+    const prices = deriveLiquorPricing(Number(product.bottle_price));
+    for (const row of prices) {
+      const existing = db
+        .prepare('SELECT * FROM product_variants WHERE product_id = ? AND ml = ?')
+        .get(product.id, row.ml);
+      if (!existing) continue;
+      if (Number(existing.price) === row.price) continue;
+      db.prepare('UPDATE product_variants SET price = ? WHERE id = ?').run(row.price, existing.id);
+      changed += 1;
+    }
+  }
+  setSetting('liquor_pricing_v4', '1');
+  if (changed) {
+    audit({ id: null, name: 'system' }, 'migration.liquor_loose_markup', 'product', null, {
+      variants: changed,
+      rule: 'loose = ceil(((bottle_price / 180 * ml) + 5) / 5) * 5; 180 ml unchanged',
+    });
+  }
+  return changed > 0;
+}
+
+/**
  * Beer: every bottle size is an independent product variant with its own
  * purchase price, selling price and stock balance. Existing beer products keep
  * their id and their current stock (moved onto their existing bottle size), and
@@ -273,7 +307,8 @@ export function migrateCatalog() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_variants_product_stock ON product_variants(product_id, stock_qty)');
 
   const liquor = migrateLiquorPricing();
+  const looseMarkup = migrateLiquorLooseMarkup();
   const beer = migrateBeerSizes();
   const repaired = repairBeerVariants();
-  return { backup: backupPath, liquor, beer, repaired };
+  return { backup: backupPath, liquor, looseMarkup, beer, repaired };
 }
