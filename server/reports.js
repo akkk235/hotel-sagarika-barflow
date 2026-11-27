@@ -445,12 +445,14 @@ export function reportBeer(f, { includeCost = false } = {}) {
     purchased.set(Number(row.variant_id), row);
   }
 
-  // opening = closing - every stock movement recorded inside the range.
+  // opening = closing - every stock movement recorded inside the range. The 'opening'
+  // movement states the balance itself, so counting it would cancel the opening stock.
   const moved = new Map();
   for (const row of db
     .prepare(
       `SELECT variant_id, SUM(change_qty) AS qty FROM stock_ledger
-       WHERE variant_id IS NOT NULL AND substr(created_at,1,10) BETWEEN ? AND ?
+       WHERE variant_id IS NOT NULL AND movement != 'opening'
+         AND substr(created_at,1,10) BETWEEN ? AND ?
        GROUP BY variant_id`,
     )
     .all(f.from, f.to)) {
