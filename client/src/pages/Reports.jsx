@@ -35,6 +35,9 @@ const ALL_TABS = [
   { id: 'liquor', label: 'Liquor', managerToday: true },
   { id: 'beer', label: 'Beer', managerToday: true },
   { id: 'stock', label: 'Stock', owner: true },
+  { id: 'stock_daily', label: 'Day-wise Stock', managerToday: true },
+  { id: 'stock_monthly', label: 'Monthly Stock', owner: true },
+  { id: 'monthly', label: 'Monthly Sales', owner: true },
   { id: 'purchases', label: 'Purchases' },
   { id: 'payments', label: 'Payments', managerToday: true },
   { id: 'tables', label: 'Tables', managerToday: true },
@@ -80,6 +83,7 @@ export default function Reports({ notify, online, user }) {
   const [from, setFrom] = useState(todayStr());
   const [to, setTo] = useState(todayStr());
   const [group, setGroup] = useState('day');
+  const [month, setMonth] = useState(() => todayStr().slice(0, 7));
   const [filters, setFilters] = useState({ staff_id: '', product_id: '', category_id: '', payment_mode: '' });
   const [report, setReport] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -188,6 +192,16 @@ export default function Reports({ notify, online, user }) {
   useEffect(() => {
     loadExpenses();
   }, [loadExpenses]);
+
+  const applyMonth = (value) => {
+    if (!value) return;
+    setMonth(value);
+    const [y, m] = value.split('-').map(Number);
+    const last = new Date(y, m, 0).getDate();
+    setFrom(`${value}-01`);
+    setTo(`${value}-${String(last).padStart(2, '0')}`);
+    setRangeId('custom');
+  };
 
   const applyRange = (id) => {
     const r = RANGES.find((x) => x.id === id);
@@ -424,6 +438,15 @@ export default function Reports({ notify, online, user }) {
         </label>
       </div>
 
+      {tab === 'monthly' || tab === 'stock_monthly' ? (
+        <div className="filter-grid">
+          <label>
+            Month
+            <input type="month" value={month} onChange={(e) => applyMonth(e.target.value)} />
+          </label>
+        </div>
+      ) : null}
+
       <div className="tab-strip">
         {tabs.map((t) => (
           <button key={t.id} type="button" className={`chip ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
@@ -458,8 +481,10 @@ export default function Reports({ notify, online, user }) {
       ) : null}
 
       <div className="report-actions">
+        <button type="button" className="btn primary export-btn" onClick={() => download('xlsx')} disabled={!report}>
+          ⬇ Export to Excel (.xlsx)
+        </button>
         <button type="button" className="btn ghost" onClick={printReport} disabled={!report}>Print</button>
-        <button type="button" className="btn ghost" onClick={() => download('xlsx')} disabled={!report}>Excel (.xlsx)</button>
         <button type="button" className="btn ghost" onClick={() => download('pdf')} disabled={!report}>PDF</button>
         <button type="button" className="btn ghost" onClick={load} disabled={busy}>{busy ? 'Loading…' : 'Refresh'}</button>
       </div>
