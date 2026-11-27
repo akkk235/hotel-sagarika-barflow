@@ -125,7 +125,7 @@ function migrateBeerSizes() {
   let changed = 0;
   for (const product of products) {
     if (product.unit_type !== 'unit') continue;
-    const variants = db
+    let variants = db
       .prepare('SELECT * FROM product_variants WHERE product_id = ? ORDER BY sort_order, ml')
       .all(product.id);
     db.prepare("UPDATE products SET stock_mode = 'variant', updated_at = ? WHERE id = ?").run(now, product.id);
@@ -133,6 +133,19 @@ function migrateBeerSizes() {
     if (variants.length === 0) {
       insert.run(product.id, beerSizeLabel(650), 650, 0, 0, now, round2(product.stock_qty), product.cost_price);
     } else {
+      // A beer product created before per-size stock has a single variant standing for its
+      // original bottle and carrying no ml. Adopt it as the 650 ml size; inserting a second
+      // 650 ml row would split the same bottle between two sizes.
+      const legacy = variants.find((v) => !Number(v.ml));
+      if (legacy && !variants.some((v) => Number(v.ml) === 650)) {
+        db.prepare('UPDATE product_variants SET ml = 650, label = ?, consume_qty = 1 WHERE id = ?').run(
+          beerSizeLabel(650),
+          legacy.id,
+        );
+        variants = db
+          .prepare('SELECT * FROM product_variants WHERE product_id = ? ORDER BY sort_order, ml')
+          .all(product.id);
+      }
       // Product-level stock becomes the stock of the product's original size.
       const primary = variants.find((v) => Number(v.ml) === 650) || variants[0];
       db.prepare('UPDATE product_variants SET stock_qty = ?, is_default = 1 WHERE id = ?').run(
@@ -153,7 +166,8 @@ function migrateBeerSizes() {
     const total = db
       .prepare('SELECT COALESCE(SUM(stock_qty), 0) AS total FROM product_variants WHERE product_id = ?')
       .get(product.id).total;
-    db.prepare('UPDATE products SET stock_qty = ?, updated_at = ? WHERE id = ?').run(
+    db.prepare('UPDATE products SET stock_qty = ?, stock_bottles = ?, updated_at = ? WHERE id = ?').run(
+      round4(total),
       round4(total),
       now,
       product.id,
@@ -190,5 +204,6 @@ export function migrateCatalog() {
 
   const liquor = migrateLiquorPricing();
   const beer = migrateBeerSizes();
-  return { backup: backupPath, liquor, beer };
+  const repaired = repairBeerVariants();
+  return { backup: backupPath, liquor, beer, repaired };
 }

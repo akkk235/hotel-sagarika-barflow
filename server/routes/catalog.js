@@ -36,7 +36,8 @@ export function productsWithVariants({ includeInactive = false } = {}) {
     // Beer stock lives on each bottle size; the product total mirrors their sum.
     if (p.stock_mode === 'variant') {
       const total = variants.reduce((sum, v) => sum + (Number(v.stock_qty) || 0), 0);
-      return { ...p, stock_qty: Math.round(total * 10000) / 10000, variants };
+      const rounded = Math.round(total * 10000) / 10000;
+      return { ...p, stock_qty: rounded, stock_bottles: rounded, variants };
     }
     return { ...p, variants };
   });

@@ -321,7 +321,9 @@ export default function Billing({ data, settings, user, online, notify, refresh,
       ) : (
         <div className="product-grid">
           {visible.map((p) => {
-            const cheapest = p.variants.reduce((m, v) => (m === null || v.price < m ? v.price : m), null);
+            // Unpriced sizes (₹0) must not advertise the product "from ₹0.00".
+            const priced = p.variants.filter((v) => Number(v.price) > 0);
+            const cheapest = priced.reduce((m, v) => (m === null || v.price < m ? v.price : m), null);
             const low = bottlesOf(p) <= Number(p.low_stock_qty || 0);
             const out = bottlesOf(p) <= 0;
             return (
